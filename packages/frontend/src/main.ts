@@ -3,24 +3,48 @@ import { createPageMesh } from "./renderer/createPageMesh";
 import { TextureCache } from "./renderer/textureCache";
 import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
 
-const container = document.getElementById("app");
-if (!container) {
+const containerElement = document.getElementById("app");
+if (!containerElement) {
   throw new Error("Missing #app container");
 }
+// Narrow the type after null check
+const container: HTMLElement = containerElement;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f141a);
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+// Determine optimal FOV based on viewport class per spec
+function getOptimalFOV(): number {
+  const width = window.innerWidth;
+  const aspectRatio = window.innerWidth / window.innerHeight;
+  if (aspectRatio > 1.5 && width >= 1200) {
+    return 28; // Desktop landscape: narrow FOV for readable text
+  } else if (aspectRatio > 1.0 && width >= 768) {
+    return 32; // Tablet landscape: balanced FOV
+  } else {
+    return 38; // Mobile/portrait: wider FOV to show full page
+  }
+}
+
+const camera = new THREE.PerspectiveCamera(getOptimalFOV(), 1, 0.1, 100);
 camera.position.set(0, 0, 2.2);
 camera.lookAt(0, 0, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Renderer configuration optimized for text clarity per spec
+const renderer = new THREE.WebGLRenderer({
+  antialias: true, // Enable MSAA for text clarity
+  alpha: false, // Opaque background improves performance
+  powerPreference: "high-performance",
+  stencil: false, // Not needed, saves memory
+  depth: true,
+  preserveDrawingBuffer: false // Security: prevents canvas data extraction
+});
+// Cap DPR at 2 for performance while maintaining Retina sharpness
+const dpr = Math.min(window.devicePixelRatio, 2);
+renderer.setPixelRatio(dpr);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
-renderer.physicallyCorrectLights = true;
 container.appendChild(renderer.domElement);
 
 const leftPage = createPageMesh();
@@ -92,7 +116,12 @@ scene.add(rim);
 function resize() {
   const { clientWidth, clientHeight } = container;
   camera.aspect = clientWidth / clientHeight;
+  // Update FOV based on new viewport dimensions per spec
+  camera.fov = getOptimalFOV();
   camera.updateProjectionMatrix();
+  // Update renderer size accounting for DPR
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  renderer.setPixelRatio(dpr);
   renderer.setSize(clientWidth, clientHeight);
 }
 
@@ -194,14 +223,26 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
 }
 
 function fitCamera(width: number, height: number, mode: LayoutMode) {
-  const margin = 1.08;
+  // Per spec: page should occupy ~75% of screen width for optimal readability
+  const targetPageScreenRatio = 0.75;
+  const margin = 1.15; // 15% margin around book per spec
+
   const vFov = THREE.MathUtils.degToRad(camera.fov);
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-  const distH = (width * margin) / (2 * Math.tan(hFov / 2));
-  const distV = (height * margin) / (2 * Math.tan(vFov / 2));
-  const minFraction = mode === "double" ? 0.68 : 0.78;
+
+  // Calculate distance to fit content with margins
+  const contentWidth = width * margin;
+  const contentHeight = height * margin;
+  const distH = contentWidth / (2 * Math.tan(hFov / 2));
+  const distV = contentHeight / (2 * Math.tan(vFov / 2));
+
+  // Ensure readable text: page shouldn't occupy less than target ratio of viewport
+  const minFraction = mode === "double" ? 0.65 : targetPageScreenRatio;
   const readableDistance = height / (2 * Math.tan(vFov / 2) * minFraction);
-  const distance = Math.min(Math.max(distH, distV, 1.2), readableDistance);
+
+  // Choose distance that shows full content while maintaining readability
+  const distance = Math.min(Math.max(distH, distV, 1.0), readableDistance);
+
   camera.position.set(0, 0, distance);
   camera.lookAt(0, 0, 0);
 }
@@ -330,7 +371,6 @@ async function loadTexture(url: string) {
   const blob = await fetchImageBlob(token, url);
   const objectUrl = URL.createObjectURL(blob);
   const image = new Image();
-  const texture = new THREE.CanvasTexture(document.createElement("canvas"));
 
   await new Promise<void>((resolve, reject) => {
     image.onload = () => resolve();
@@ -338,30 +378,28 @@ async function loadTexture(url: string) {
     image.src = objectUrl;
   });
 
-  texture.center.set(0.5, 0.5);
-  texture.rotation = Math.PI;
-  texture.repeat.set(-1, 1);
-  texture.offset.set(1, 0);
-  const canvas = texture.image as HTMLCanvasElement;
-  canvas.width = image.width;
-  canvas.height = image.height;
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
-    ctx.drawImage(image, 0, 0);
-  }
-  texture.needsUpdate = true;
+  // Create texture directly from loaded image - keep it simple
+  const texture = new THREE.Texture(image);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  texture.generateMipmaps = false;
-  texture.minFilter = THREE.LinearFilter;
+  // Enable mipmaps with trilinear filtering for text clarity per spec
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+
   if (debugPreview) {
-    debugPreview.src = canvas.toDataURL("image/png");
+    debugPreview.src = objectUrl;
     debugPreview.style.display = "block";
   }
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+
+  // Revoke object URL after texture is uploaded to GPU (next frame)
+  requestAnimationFrame(() => {
+    URL.revokeObjectURL(objectUrl);
+  });
+
   const result = { key: url, texture, width: image.width, height: image.height, lastUsed: Date.now() };
   if (!disableTextureCache) {
     textureCache.set(url, result);

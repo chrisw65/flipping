@@ -2,12 +2,16 @@
   "name": "@flipbook/watermark",
   "private": true,
   "type": "module",
-  "main": "./src/index.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --out-dir dist",
+    "build": "tsup src/index.ts --format esm --dts --out-dir dist",
     "test": "vitest",
     "lint": "pnpm -w eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
