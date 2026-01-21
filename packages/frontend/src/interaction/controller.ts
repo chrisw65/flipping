@@ -1,21 +1,21 @@
 /**
  * Flipbook Interaction Controller
- * Connects state machine, physics, and input handling
+ * Handles book-style page turning around the spine
  */
 
 import { FlipbookStateMachine, FlipbookState } from "./stateMachine";
-import { PagePhysics, calculateDragProgress } from "./physics";
+import { PagePhysics } from "./physics";
 import type { PageMesh } from "../renderer/createPageMesh";
 
 export interface InteractionConfig {
-  // Corner hit area as fraction of page dimension
-  cornerHitAreaFraction: number;
+  // Hit area on right side for forward turn (fraction of width)
+  turnAreaFraction: number;
   // Minimum drag distance to start turn (pixels)
   dragThreshold: number;
 }
 
 const DEFAULT_CONFIG: InteractionConfig = {
-  cornerHitAreaFraction: 0.15,
+  turnAreaFraction: 0.3,
   dragThreshold: 10,
 };
 
@@ -29,6 +29,7 @@ export class FlipbookController {
   private leftPage: PageMesh;
   private rightPage: PageMesh;
   private turningPage: PageMesh | null = null;
+  private turnDirection: "forward" | "backward" | null = null;
 
   private container: HTMLElement;
   private pageWidth: number = 1;
@@ -36,7 +37,6 @@ export class FlipbookController {
 
   private isDragging: boolean = false;
   private dragStartX: number = 0;
-  private dragStartY: number = 0;
 
   private animationFrame: number | null = null;
   private lastTime: number = 0;
@@ -56,7 +56,14 @@ export class FlipbookController {
     this.config = { ...DEFAULT_CONFIG, ...config };
 
     this.stateMachine = new FlipbookStateMachine(totalPages);
-    this.physics = new PagePhysics();
+    this.physics = new PagePhysics({
+      springK: 80,
+      damping: 12,
+    });
+
+    // Initialize page sides
+    this.leftPage.setSide("left");
+    this.rightPage.setSide("right");
 
     this.setupEventListeners();
     this.setupStateListeners();
@@ -98,22 +105,20 @@ export class FlipbookController {
 
   private setupStateListeners(): void {
     this.stateMachine.onStateChange((oldState, newState) => {
-      // Handle state transitions
       if (
         newState === FlipbookState.DRAGGING_FORWARD ||
-        newState === FlipbookState.DRAGGING_BACKWARD
+        newState === FlipbookState.ANIMATING_FORWARD
       ) {
-        this.turningPage = newState === FlipbookState.DRAGGING_FORWARD
-          ? this.rightPage
-          : this.leftPage;
+        this.turnDirection = "forward";
+        this.turningPage = this.rightPage;
         this.turningPage.beginAnimation();
-      }
-
-      if (
-        newState === FlipbookState.ANIMATING_FORWARD ||
+      } else if (
+        newState === FlipbookState.DRAGGING_BACKWARD ||
         newState === FlipbookState.ANIMATING_BACKWARD
       ) {
-        this.startAnimationLoop();
+        this.turnDirection = "backward";
+        this.turningPage = this.leftPage;
+        this.turningPage.beginAnimation();
       }
 
       if (newState === FlipbookState.SETTLING) {
@@ -126,6 +131,7 @@ export class FlipbookController {
           this.turningPage.setProgress(0);
           this.turningPage = null;
         }
+        this.turnDirection = null;
       }
     });
   }
@@ -138,27 +144,37 @@ export class FlipbookController {
     };
   }
 
-  private detectCorner(x: number, y: number): "left" | "right" | null {
+  private detectTurnZone(x: number): "left" | "right" | null {
     const rect = this.container.getBoundingClientRect();
-    const cornerSize = Math.min(rect.width, rect.height) * this.config.cornerHitAreaFraction;
+    const turnZoneWidth = rect.width * this.config.turnAreaFraction;
 
-    const isInRightCorner = x > rect.width - cornerSize;
-    const isInLeftCorner = x < cornerSize;
-
-    if (isInRightCorner) return "right";
-    if (isInLeftCorner) return "left";
+    // Right side - turn forward
+    if (x > rect.width - turnZoneWidth) {
+      return "right";
+    }
+    // Left side - turn backward
+    if (x < turnZoneWidth) {
+      return "left";
+    }
     return null;
   }
 
   private handlePointerDown = (e: MouseEvent): void => {
-    const pos = this.getPointerPosition(e);
-    const corner = this.detectCorner(pos.x, pos.y);
+    if (this.stateMachine.getState() !== FlipbookState.IDLE) return;
 
-    if (corner) {
+    const pos = this.getPointerPosition(e);
+    const zone = this.detectTurnZone(pos.x);
+
+    if (zone === "right" && this.stateMachine.canTurnForward()) {
       this.isDragging = true;
       this.dragStartX = pos.x;
-      this.dragStartY = pos.y;
-      this.stateMachine.startDrag(pos.x, pos.y, corner);
+      this.stateMachine.startDrag(pos.x, pos.y, "right");
+      this.physics.setPosition(0);
+      e.preventDefault();
+    } else if (zone === "left" && this.stateMachine.canTurnBackward()) {
+      this.isDragging = true;
+      this.dragStartX = pos.x;
+      this.stateMachine.startDrag(pos.x, pos.y, "left");
       this.physics.setPosition(0);
       e.preventDefault();
     }
@@ -168,17 +184,13 @@ export class FlipbookController {
     const pos = this.getPointerPosition(e);
     const state = this.stateMachine.getState();
 
-    if (this.isDragging && (
-      state === FlipbookState.DRAGGING_FORWARD ||
-      state === FlipbookState.DRAGGING_BACKWARD
-    )) {
-      const direction = state === FlipbookState.DRAGGING_FORWARD ? "forward" : "backward";
-      const progress = calculateDragProgress(
-        this.dragStartX,
-        pos.x,
-        this.container.getBoundingClientRect().width * 0.5,
-        direction
-      );
+    if (!this.isDragging) return;
+
+    if (state === FlipbookState.DRAGGING_FORWARD) {
+      // Drag left to turn forward - progress increases as we drag left
+      const dragDistance = this.dragStartX - pos.x;
+      const maxDrag = this.container.getBoundingClientRect().width * 0.6;
+      const progress = Math.max(0, Math.min(1, dragDistance / maxDrag));
 
       this.stateMachine.updateDrag(pos.x, pos.y, progress);
       this.physics.setPosition(progress);
@@ -186,13 +198,17 @@ export class FlipbookController {
       if (this.turningPage) {
         this.turningPage.setProgress(progress);
       }
-    } else if (state === FlipbookState.IDLE) {
-      // Check for hover
-      const corner = this.detectCorner(pos.x, pos.y);
-      if (corner) {
-        this.stateMachine.hoverCorner(corner);
-      } else {
-        this.stateMachine.leaveCorner();
+    } else if (state === FlipbookState.DRAGGING_BACKWARD) {
+      // Drag right to turn backward
+      const dragDistance = pos.x - this.dragStartX;
+      const maxDrag = this.container.getBoundingClientRect().width * 0.6;
+      const progress = Math.max(0, Math.min(1, dragDistance / maxDrag));
+
+      this.stateMachine.updateDrag(pos.x, pos.y, progress);
+      this.physics.setPosition(progress);
+
+      if (this.turningPage) {
+        this.turningPage.setProgress(progress);
       }
     }
   };
@@ -206,63 +222,40 @@ export class FlipbookController {
       state === FlipbookState.DRAGGING_FORWARD ||
       state === FlipbookState.DRAGGING_BACKWARD
     ) {
-      const { shouldComplete, direction } = this.stateMachine.endDrag();
-      const currentProgress = this.physics.getPosition();
+      const { shouldComplete } = this.stateMachine.endDrag();
 
       if (shouldComplete) {
         // Animate to completion (progress = 1)
         this.physics.release(1, 0);
+        this.startAnimationLoop();
       } else {
         // Snap back (progress = 0)
         this.physics.release(0, 0);
+        this.startAnimationLoop();
       }
     }
   };
 
   private handleTouchStart = (e: TouchEvent): void => {
-    if (e.touches.length === 1) {
-      const touch = e.touches[0];
-      const pos = this.getPointerPosition(touch);
-      const corner = this.detectCorner(pos.x, pos.y);
-
-      if (corner) {
-        this.isDragging = true;
-        this.dragStartX = pos.x;
-        this.dragStartY = pos.y;
-        this.stateMachine.startDrag(pos.x, pos.y, corner);
-        this.physics.setPosition(0);
-        e.preventDefault();
-      }
-    }
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const mouseEvent = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      preventDefault: () => e.preventDefault(),
+    } as MouseEvent;
+    this.handlePointerDown(mouseEvent);
   };
 
   private handleTouchMove = (e: TouchEvent): void => {
-    if (e.touches.length === 1 && this.isDragging) {
-      const touch = e.touches[0];
-      const pos = this.getPointerPosition(touch);
-      const state = this.stateMachine.getState();
-
-      if (
-        state === FlipbookState.DRAGGING_FORWARD ||
-        state === FlipbookState.DRAGGING_BACKWARD
-      ) {
-        const direction = state === FlipbookState.DRAGGING_FORWARD ? "forward" : "backward";
-        const progress = calculateDragProgress(
-          this.dragStartX,
-          pos.x,
-          this.container.getBoundingClientRect().width * 0.5,
-          direction
-        );
-
-        this.stateMachine.updateDrag(pos.x, pos.y, progress);
-        this.physics.setPosition(progress);
-
-        if (this.turningPage) {
-          this.turningPage.setProgress(progress);
-        }
-        e.preventDefault();
-      }
-    }
+    if (e.touches.length !== 1 || !this.isDragging) return;
+    const touch = e.touches[0];
+    const mouseEvent = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+    } as MouseEvent;
+    this.handlePointerMove(mouseEvent);
+    e.preventDefault();
   };
 
   private handleTouchEnd = (): void => {
@@ -271,8 +264,10 @@ export class FlipbookController {
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (e.key === "ArrowRight" || e.key === " ") {
+      e.preventDefault();
       this.turnPageForward();
     } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
       this.turnPageBackward();
     }
   };
@@ -281,28 +276,28 @@ export class FlipbookController {
    * Programmatically turn page forward
    */
   turnPageForward(): boolean {
-    if (this.stateMachine.turnPage("forward")) {
-      this.turningPage = this.rightPage;
-      this.turningPage.beginAnimation();
-      this.physics.setPosition(0);
-      this.physics.release(1, 2); // Start with some velocity
-      return true;
-    }
-    return false;
+    if (this.stateMachine.getState() !== FlipbookState.IDLE) return false;
+    if (!this.stateMachine.canTurnForward()) return false;
+
+    this.stateMachine.turnPage("forward");
+    this.physics.setPosition(0);
+    this.physics.release(1, 1.5); // Add some initial velocity
+    this.startAnimationLoop();
+    return true;
   }
 
   /**
    * Programmatically turn page backward
    */
   turnPageBackward(): boolean {
-    if (this.stateMachine.turnPage("backward")) {
-      this.turningPage = this.leftPage;
-      this.turningPage.beginAnimation();
-      this.physics.setPosition(0);
-      this.physics.release(1, 2);
-      return true;
-    }
-    return false;
+    if (this.stateMachine.getState() !== FlipbookState.IDLE) return false;
+    if (!this.stateMachine.canTurnBackward()) return false;
+
+    this.stateMachine.turnPage("backward");
+    this.physics.setPosition(0);
+    this.physics.release(1, 1.5);
+    this.startAnimationLoop();
+    return true;
   }
 
   private startAnimationLoop(): void {
@@ -330,18 +325,30 @@ export class FlipbookController {
     }
 
     if (this.physics.isAtRest()) {
-      const direction = state === FlipbookState.ANIMATING_FORWARD ? "forward" : "backward";
+      // Check if we completed the turn or snapped back
+      const completedTurn = progress > 0.5;
 
       if (
         state === FlipbookState.ANIMATING_FORWARD ||
         state === FlipbookState.ANIMATING_BACKWARD
       ) {
+        const direction = state === FlipbookState.ANIMATING_FORWARD ? "forward" : "backward";
         this.stateMachine.completeAnimation(direction);
         if (this.onPageChange) {
           this.onPageChange(this.stateMachine.getCurrentPage());
         }
       } else if (state === FlipbookState.SETTLING) {
-        this.stateMachine.completeSettling();
+        if (completedTurn) {
+          // Finished the turn
+          const direction = this.turnDirection === "forward" ? "forward" : "backward";
+          this.stateMachine.completeAnimation(direction);
+          if (this.onPageChange) {
+            this.onPageChange(this.stateMachine.getCurrentPage());
+          }
+        } else {
+          // Snapped back
+          this.stateMachine.completeSettling();
+        }
       }
 
       this.stopAnimationLoop();
