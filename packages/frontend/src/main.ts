@@ -3,6 +3,7 @@ import { createPageMesh } from "./renderer/createPageMesh";
 import { TextureCache } from "./renderer/textureCache";
 import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
 import { FlipbookController } from "./interaction/controller";
+import { createInteractionDebugOverlay } from "./interaction/debugOverlay";
 
 const containerElement = document.getElementById("app");
 if (!containerElement) {
@@ -130,11 +131,25 @@ window.addEventListener("resize", resize);
 resize();
 
 // Initialize the flipbook controller for interactions
+const debugHit = new URLSearchParams(window.location.search).has("debugHit");
+const debugOverlay = debugHit
+  ? createInteractionDebugOverlay(renderer.domElement, {
+      cornerHitAreaFraction: 0.18,
+      edgeHitAreaFraction: 0.12,
+    })
+  : null;
+
 const flipbookController = new FlipbookController(
   container,
+  camera,
+  renderer,
   leftPage,
   rightPage,
-  1 // Will be updated when document is loaded
+  1,
+  {
+    debug: debugHit,
+    debugReporter: debugOverlay ? debugOverlay.setMessage : undefined,
+  }
 );
 
 // Track current page for loading textures
@@ -174,6 +189,10 @@ async function loadCurrentSpread() {
 function animate(time: number = 0) {
   // Update controller (handles physics animation internally)
   flipbookController.update(time / 1000);
+  if (debugOverlay) {
+    debugOverlay.setPageBounds("left", getScreenBounds(leftPage.mesh));
+    debugOverlay.setPageBounds("right", getScreenBounds(rightPage.mesh));
+  }
 
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
@@ -532,6 +551,36 @@ function createPaperTexture() {
   texture.needsUpdate = true;
   texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
+}
+
+function getScreenBounds(mesh: THREE.Mesh) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const geometry = mesh.geometry as THREE.BufferGeometry;
+  if (!geometry.boundingBox) {
+    geometry.computeBoundingBox();
+  }
+  const box = geometry.boundingBox;
+  if (!box) return null;
+  const corners = [
+    new THREE.Vector3(box.min.x, box.min.y, 0),
+    new THREE.Vector3(box.max.x, box.min.y, 0),
+    new THREE.Vector3(box.min.x, box.max.y, 0),
+    new THREE.Vector3(box.max.x, box.max.y, 0),
+  ];
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const corner of corners) {
+    corner.applyMatrix4(mesh.matrixWorld).project(camera);
+    const sx = ((corner.x + 1) / 2) * rect.width;
+    const sy = ((-corner.y + 1) / 2) * rect.height;
+    minX = Math.min(minX, sx);
+    maxX = Math.max(maxX, sx);
+    minY = Math.min(minY, sy);
+    maxY = Math.max(maxY, sy);
+  }
+  return { minX, maxX, minY, maxY };
 }
 
 function getPageAspect() {

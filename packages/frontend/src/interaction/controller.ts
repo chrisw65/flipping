@@ -6,17 +6,30 @@
 import { FlipbookStateMachine, FlipbookState } from "./stateMachine";
 import { PagePhysics } from "./physics";
 import type { PageMesh } from "../renderer/createPageMesh";
+import * as THREE from "three";
 
 export interface InteractionConfig {
   // Hit area on right side for forward turn (fraction of width)
   turnAreaFraction: number;
   // Minimum drag distance to start turn (pixels)
   dragThreshold: number;
+  // Corner hit area size as fraction of page size
+  cornerHitAreaFraction: number;
+  // Edge hit area size as fraction of page size (non-corner)
+  edgeHitAreaFraction: number;
+  // Enable console debug logging
+  debug: boolean;
+  // Optional debug reporter for on-screen overlay
+  debugReporter?: (message: string) => void;
 }
 
 const DEFAULT_CONFIG: InteractionConfig = {
   turnAreaFraction: 0.3,
   dragThreshold: 10,
+  cornerHitAreaFraction: 0.18,
+  edgeHitAreaFraction: 0.12,
+  debug: false,
+  debugReporter: undefined,
 };
 
 export type PageChangeCallback = (page: number) => void;
@@ -32,11 +45,24 @@ export class FlipbookController {
   private turnDirection: "forward" | "backward" | null = null;
 
   private container: HTMLElement;
+  private camera: THREE.PerspectiveCamera;
+  private renderer: THREE.WebGLRenderer;
+  private inputTarget: HTMLElement;
   private pageWidth: number = 1;
   private pageHeight: number = 1;
+  private raycaster = new THREE.Raycaster();
+  private pointerNdc = new THREE.Vector2();
+  private tempVec = new THREE.Vector3();
+  private tempVec2 = new THREE.Vector3();
+  private tempVec3 = new THREE.Vector3();
+  private tempVec4 = new THREE.Vector3();
 
   private isDragging: boolean = false;
   private dragStartX: number = 0;
+  private dragStartU: number = 0;
+  private dragStartTime: number = 0;
+  private dragSide: "left" | "right" | null = null;
+  private hasExceededThreshold: boolean = false;
 
   private animationFrame: number | null = null;
   private lastTime: number = 0;
@@ -45,12 +71,18 @@ export class FlipbookController {
 
   constructor(
     container: HTMLElement,
+    camera: THREE.PerspectiveCamera,
+    renderer: THREE.WebGLRenderer,
     leftPage: PageMesh,
     rightPage: PageMesh,
     totalPages: number,
     config: Partial<InteractionConfig> = {}
   ) {
     this.container = container;
+    this.camera = camera;
+    this.renderer = renderer;
+    this.inputTarget = renderer.domElement;
+    this.inputTarget.style.touchAction = "none";
     this.leftPage = leftPage;
     this.rightPage = rightPage;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -87,17 +119,11 @@ export class FlipbookController {
   }
 
   private setupEventListeners(): void {
-    // Mouse events
-    this.container.addEventListener("mousedown", this.handlePointerDown);
-    this.container.addEventListener("mousemove", this.handlePointerMove);
-    this.container.addEventListener("mouseup", this.handlePointerUp);
-    this.container.addEventListener("mouseleave", this.handlePointerUp);
-
-    // Touch events
-    this.container.addEventListener("touchstart", this.handleTouchStart, { passive: false });
-    this.container.addEventListener("touchmove", this.handleTouchMove, { passive: false });
-    this.container.addEventListener("touchend", this.handleTouchEnd);
-    this.container.addEventListener("touchcancel", this.handleTouchEnd);
+    // Pointer events (mouse + touch)
+    this.inputTarget.addEventListener("pointerdown", this.handlePointerDown);
+    window.addEventListener("pointermove", this.handlePointerMove);
+    window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("pointercancel", this.handlePointerUp);
 
     // Keyboard events
     window.addEventListener("keydown", this.handleKeyDown);
@@ -137,85 +163,187 @@ export class FlipbookController {
   }
 
   private getPointerPosition(e: MouseEvent | Touch): { x: number; y: number } {
-    const rect = this.container.getBoundingClientRect();
+    const rect = this.inputTarget.getBoundingClientRect();
     return {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
     };
   }
 
-  private detectTurnZone(x: number): "left" | "right" | null {
-    const rect = this.container.getBoundingClientRect();
-    const turnZoneWidth = rect.width * this.config.turnAreaFraction;
-
-    // Right side - turn forward
-    if (x > rect.width - turnZoneWidth) {
-      return "right";
-    }
-    // Left side - turn backward
-    if (x < turnZoneWidth) {
-      return "left";
+  private getPageHit(e: MouseEvent | Touch) {
+    const rect = this.inputTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const pages = [this.rightPage, this.leftPage].filter((p) => p.mesh.visible);
+    for (const page of pages) {
+      const bounds = this.getScreenBounds(page.mesh, rect);
+      if (!bounds) continue;
+      if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) {
+        continue;
+      }
+      const u = (x - bounds.minX) / Math.max(bounds.maxX - bounds.minX, 1);
+      const v = 1 - (y - bounds.minY) / Math.max(bounds.maxY - bounds.minY, 1);
+      return { page, u, v };
     }
     return null;
   }
 
-  private handlePointerDown = (e: MouseEvent): void => {
+  private getScreenBounds(
+    mesh: THREE.Mesh,
+    rect: DOMRect
+  ): { minX: number; maxX: number; minY: number; maxY: number } | null {
+    const geometry = mesh.geometry as THREE.BufferGeometry;
+    if (!geometry.boundingBox) {
+      geometry.computeBoundingBox();
+    }
+    const box = geometry.boundingBox;
+    if (!box) return null;
+    this.tempVec.set(box.min.x, box.min.y, 0);
+    this.tempVec2.set(box.max.x, box.min.y, 0);
+    this.tempVec3.set(box.min.x, box.max.y, 0);
+    this.tempVec4.set(box.max.x, box.max.y, 0);
+    const pts = [this.tempVec, this.tempVec2, this.tempVec3, this.tempVec4];
+
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    for (const p of pts) {
+      p.applyMatrix4(mesh.matrixWorld).project(this.camera);
+      const sx = ((p.x + 1) / 2) * rect.width;
+      const sy = ((-p.y + 1) / 2) * rect.height;
+      minX = Math.min(minX, sx);
+      maxX = Math.max(maxX, sx);
+      minY = Math.min(minY, sy);
+      maxY = Math.max(maxY, sy);
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
+  private detectHitZone(u: number, v: number): "corner" | "edge" | "none" {
+    const cornerSize = this.config.cornerHitAreaFraction;
+    const edgeSize = this.config.edgeHitAreaFraction;
+    const nearOuter = u > 1 - edgeSize;
+    if (!nearOuter) return "none";
+    const nearCornerOuter = u > 1 - cornerSize;
+    const nearTop = v > 1 - cornerSize;
+    const nearBottom = v < cornerSize;
+    if (nearCornerOuter && (nearTop || nearBottom)) return "corner";
+    return "edge";
+  }
+
+  private handlePointerDown = (e: PointerEvent): void => {
     if (this.stateMachine.getState() !== FlipbookState.IDLE) return;
 
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     const pos = this.getPointerPosition(e);
-    const zone = this.detectTurnZone(pos.x);
-
-    if (zone === "right" && this.stateMachine.canTurnForward()) {
-      this.isDragging = true;
-      this.dragStartX = pos.x;
-      this.stateMachine.startDrag(pos.x, pos.y, "right");
-      this.physics.setPosition(0);
-      e.preventDefault();
-    } else if (zone === "left" && this.stateMachine.canTurnBackward()) {
-      this.isDragging = true;
-      this.dragStartX = pos.x;
-      this.stateMachine.startDrag(pos.x, pos.y, "left");
-      this.physics.setPosition(0);
-      e.preventDefault();
+    const hit = this.getPageHit(e);
+    if (!hit) {
+      if (this.config.debug) {
+        const message = `hit: none (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`;
+        console.log("flipbook: pointerdown no hit", { x: pos.x, y: pos.y });
+        this.config.debugReporter?.(message);
+      }
+      return;
     }
+    const side = hit.page.getSide();
+    const uOuter = side === "left" ? 1 - hit.u : hit.u;
+    const zone = this.detectHitZone(uOuter, hit.v);
+    if (zone === "none") {
+      if (this.config.debug) {
+        const message = `hit: miss ${side} u=${uOuter.toFixed(2)} v=${hit.v.toFixed(2)}`;
+        console.log("flipbook: pointerdown miss zone", {
+          side,
+          u: hit.u,
+          v: hit.v,
+          uOuter,
+        });
+        this.config.debugReporter?.(message);
+      }
+      return;
+    }
+    if (side === "right" && !this.stateMachine.canTurnForward()) return;
+    if (side === "left" && !this.stateMachine.canTurnBackward()) return;
+    if (this.config.debug) {
+      const message = `hit: ${zone} ${side} u=${uOuter.toFixed(2)} v=${hit.v.toFixed(2)}`;
+      console.log("flipbook: pointerdown start drag", {
+        side,
+        zone,
+        u: hit.u,
+        v: hit.v,
+        uOuter,
+      });
+      this.config.debugReporter?.(message);
+    }
+
+    this.isDragging = true;
+    this.dragStartX = pos.x;
+    this.dragStartU = uOuter;
+    this.dragStartTime = performance.now();
+    this.dragSide = side;
+    this.hasExceededThreshold = false;
+    this.stateMachine.startDrag(pos.x, pos.y, side);
+    this.physics.setPosition(0);
+    e.preventDefault();
+    (e.target as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
   };
 
-  private handlePointerMove = (e: MouseEvent): void => {
+  private handlePointerMove = (e: PointerEvent): void => {
     const pos = this.getPointerPosition(e);
     const state = this.stateMachine.getState();
 
-    if (!this.isDragging) return;
-
-    if (state === FlipbookState.DRAGGING_FORWARD) {
-      // Drag left to turn forward - progress increases as we drag left
-      const dragDistance = this.dragStartX - pos.x;
-      const maxDrag = this.container.getBoundingClientRect().width * 0.6;
-      const progress = Math.max(0, Math.min(1, dragDistance / maxDrag));
-
-      this.stateMachine.updateDrag(pos.x, pos.y, progress);
-      this.physics.setPosition(progress);
-
-      if (this.turningPage) {
-        this.turningPage.setProgress(progress);
+    if (!this.isDragging) {
+      const hoverHit = this.getPageHit(e);
+      if (hoverHit) {
+        const hoverSide = hoverHit.page.getSide();
+        const hoverOuterU = hoverSide === "left" ? 1 - hoverHit.u : hoverHit.u;
+        if (this.detectHitZone(hoverOuterU, hoverHit.v) !== "none") {
+          this.stateMachine.hoverCorner(hoverSide);
+        } else {
+          this.stateMachine.leaveCorner();
+        }
+      } else {
+        this.stateMachine.leaveCorner();
       }
-    } else if (state === FlipbookState.DRAGGING_BACKWARD) {
-      // Drag right to turn backward
-      const dragDistance = pos.x - this.dragStartX;
-      const maxDrag = this.container.getBoundingClientRect().width * 0.6;
-      const progress = Math.max(0, Math.min(1, dragDistance / maxDrag));
+      return;
+    }
 
-      this.stateMachine.updateDrag(pos.x, pos.y, progress);
-      this.physics.setPosition(progress);
+    if (
+      state !== FlipbookState.DRAGGING_FORWARD &&
+      state !== FlipbookState.DRAGGING_BACKWARD
+    ) {
+      return;
+    }
 
-      if (this.turningPage) {
-        this.turningPage.setProgress(progress);
-      }
+    const hit = this.getPageHit(e);
+    if (!hit || !this.dragSide) return;
+    const uOuter = this.dragSide === "left" ? 1 - hit.u : hit.u;
+    const dragDistance = Math.abs(pos.x - this.dragStartX);
+    if (!this.hasExceededThreshold && dragDistance < this.config.dragThreshold) {
+      return;
+    }
+    this.hasExceededThreshold = true;
+
+    const deltaU = Math.max(0, this.dragStartU - uOuter);
+    const maxU = Math.max(this.dragStartU, 0.001);
+    const progress = Math.max(0, Math.min(1, deltaU / maxU));
+
+    this.stateMachine.updateDrag(pos.x, pos.y, progress);
+    this.physics.setPosition(progress);
+    if (this.turningPage) {
+      this.turningPage.setProgress(progress);
     }
   };
 
-  private handlePointerUp = (): void => {
+  private handlePointerUp = (e?: PointerEvent): void => {
     if (!this.isDragging) return;
     this.isDragging = false;
+    this.dragSide = null;
+    this.hasExceededThreshold = false;
+    if (e) {
+      (e.target as HTMLElement | null)?.releasePointerCapture?.(e.pointerId);
+    }
 
     const state = this.stateMachine.getState();
     if (
@@ -234,32 +362,6 @@ export class FlipbookController {
         this.startAnimationLoop();
       }
     }
-  };
-
-  private handleTouchStart = (e: TouchEvent): void => {
-    if (e.touches.length !== 1) return;
-    const touch = e.touches[0];
-    const mouseEvent = {
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-      preventDefault: () => e.preventDefault(),
-    } as MouseEvent;
-    this.handlePointerDown(mouseEvent);
-  };
-
-  private handleTouchMove = (e: TouchEvent): void => {
-    if (e.touches.length !== 1 || !this.isDragging) return;
-    const touch = e.touches[0];
-    const mouseEvent = {
-      clientX: touch.clientX,
-      clientY: touch.clientY,
-    } as MouseEvent;
-    this.handlePointerMove(mouseEvent);
-    e.preventDefault();
-  };
-
-  private handleTouchEnd = (): void => {
-    this.handlePointerUp();
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
@@ -370,14 +472,10 @@ export class FlipbookController {
    */
   dispose(): void {
     this.stopAnimationLoop();
-    this.container.removeEventListener("mousedown", this.handlePointerDown);
-    this.container.removeEventListener("mousemove", this.handlePointerMove);
-    this.container.removeEventListener("mouseup", this.handlePointerUp);
-    this.container.removeEventListener("mouseleave", this.handlePointerUp);
-    this.container.removeEventListener("touchstart", this.handleTouchStart);
-    this.container.removeEventListener("touchmove", this.handleTouchMove);
-    this.container.removeEventListener("touchend", this.handleTouchEnd);
-    this.container.removeEventListener("touchcancel", this.handleTouchEnd);
+    this.inputTarget.removeEventListener("pointerdown", this.handlePointerDown);
+    window.removeEventListener("pointermove", this.handlePointerMove);
+    window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("pointercancel", this.handlePointerUp);
     window.removeEventListener("keydown", this.handleKeyDown);
   }
 }

@@ -11,6 +11,7 @@ export type PageMesh = {
   getMaterial: () => THREE.ShaderMaterial;
   update: (time: number) => void;
   setSide: (side: "left" | "right") => void;
+  getSide: () => "left" | "right";
 };
 
 // Vertex shader for book page turn - rotates around spine with paper bend
@@ -237,6 +238,8 @@ export function createPageMesh(): PageMesh {
     }
   };
 
+  const getSide = () => pageSide;
+
   const beginAnimation = () => {
     if (isAnimating) return;
     isAnimating = true;
@@ -274,5 +277,6 @@ export function createPageMesh(): PageMesh {
     getMaterial,
     update,
     setSide,
+    getSide,
   };
 }
