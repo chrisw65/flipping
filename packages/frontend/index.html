@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flipbook</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0f141a;
+        color: #e9eef5;
+        font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      #app {
+        height: 100%;
+        width: 100%;
+        display: grid;
+        place-items: center;
+      }
+      canvas {
+        display: block;
+      }
+      #panel {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        background: rgba(10, 14, 18, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+        width: 260px;
+        font-size: 12px;
+      }
+      #panel label {
+        display: grid;
+        gap: 4px;
+      }
+      #panel input,
+      #panel button,
+      #panel select {
+        font-size: 12px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: #141b22;
+        color: #e9eef5;
+      }
+      #panel button {
+        cursor: pointer;
+        background: #1b2733;
+      }
+      #status {
+        font-size: 11px;
+        color: #9fb0c2;
+      }
+      #debugPreview {
+        width: 100%;
+        height: auto;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="panel">
+      <strong>Flipbook Dev Panel</strong>
+      <label>
+        PDF upload
+        <input id="fileInput" type="file" accept="application/pdf" />
+      </label>
+      <label>
+        Layout
+        <select id="layoutSelect">
+          <option value="auto">Auto</option>
+          <option value="single">Single</option>
+          <option value="double">Double</option>
+        </select>
+      </label>
+      <label>
+        Page size
+        <select id="sizeSelect">
+          <option value="auto">Auto</option>
+          <option value="a4">A4</option>
+          <option value="6x9">6x9</option>
+          <option value="8.5x8.5">8.5x8.5</option>
+        </select>
+      </label>
+      <label>
+        Quality
+        <select id="qualitySelect">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+        </select>
+      </label>
+      <label>
+        Page number
+        <input id="pageInput" type="number" min="1" value="1" />
+      </label>
+      <label>
+        Scale
+        <input id="scaleInput" type="number" min="0.5" step="0.1" value="2.0" />
+      </label>
+      <button id="renderButton" type="button">Render page</button>
+      <div id="status">Idle</div>
+      <img id="debugPreview" alt="Raster preview" />
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
