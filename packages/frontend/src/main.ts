@@ -212,16 +212,25 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
   const baseHeight = 1.0;
   const pageW = baseHeight * aspect;
   const pageH = baseHeight;
-  const gutter = pageW * 0.08;
+  const gutter = 0.02; // Small gap at spine
   const stackDepth = getStackDepth(pageH);
   const stackScaleZ = stackDepth / 0.12;
 
   if (mode === "double") {
     const spreadWidth = pageW * 2 + gutter;
+
+    // Set page sizes and sides
     leftPage.setSize(pageW, pageH);
     rightPage.setSize(pageW, pageH);
-    leftPage.group.position.set(-(pageW + gutter) / 2, 0, 0.01);
-    rightPage.group.position.set((pageW + gutter) / 2, 0, 0.01);
+    leftPage.setSide("left");
+    rightPage.setSide("right");
+
+    // Position pages: spine is at x=0
+    // Left page extends from x=-pageW to x=0
+    // Right page extends from x=0 to x=pageW
+    leftPage.group.position.set(0, 0, 0.01);
+    rightPage.group.position.set(0, 0, 0.01);
+
     leftStack.visible = !minimalRender;
     rightStack.visible = !minimalRender;
     spine.visible = !minimalRender;
@@ -233,26 +242,30 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
       rightStack.scale.set(pageW, pageH, 1);
       leftStack.scale.z = stackScaleZ;
       rightStack.scale.z = stackScaleZ;
-      leftStack.position.set(leftPage.group.position.x, 0, -stackDepth / 2);
-      rightStack.position.set(rightPage.group.position.x, 0, -stackDepth / 2);
+      leftStack.position.set(-pageW / 2, 0, -stackDepth / 2);
+      rightStack.position.set(pageW / 2, 0, -stackDepth / 2);
       spine.scale.set(1, pageH, stackScaleZ);
       spine.position.set(0, 0, 0);
       leftShadow.scale.set(1, pageH, 1);
       rightShadow.scale.set(1, pageH, 1);
-      leftShadow.position.set(leftPage.group.position.x + pageW / 2 - shadowWidth / 2, 0, 0.02);
-      rightShadow.position.set(rightPage.group.position.x - pageW / 2 + shadowWidth / 2, 0, 0.02);
+      leftShadow.position.set(-gutter / 2, 0, 0.02);
+      rightShadow.position.set(gutter / 2, 0, 0.02);
       rightShadow.rotation.y = Math.PI;
       shadowEdge.scale.set(1, pageH, 1);
       shadowEdge.position.set(0, 0, 0.012);
     }
     fitCamera(spreadWidth, pageH, mode);
     rightPage.group.visible = true;
+    leftPage.group.visible = true;
   } else {
+    // Single page mode - show as right page (like first page of book)
     leftPage.setSize(pageW, pageH);
-    leftPage.group.position.set(0, 0, 0);
+    leftPage.setSide("right");
+    leftPage.group.position.set(-pageW / 2, 0, 0);
     leftStack.visible = !minimalRender;
     fitCamera(pageW, pageH, mode);
     rightPage.group.visible = false;
+    leftPage.group.visible = true;
     spine.visible = false;
     shadowEdge.visible = false;
     rightStack.visible = false;
