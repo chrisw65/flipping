@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { createPageMesh } from "./renderer/createPageMesh";
 import { TextureCache } from "./renderer/textureCache";
 import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
+import { FlipbookController } from "./interaction/controller";
 
 const containerElement = document.getElementById("app");
 if (!containerElement) {
@@ -128,9 +129,52 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-function animate() {
-  leftPage.setProgress(0);
-  rightPage.setProgress(0);
+// Initialize the flipbook controller for interactions
+const flipbookController = new FlipbookController(
+  container,
+  leftPage,
+  rightPage,
+  1 // Will be updated when document is loaded
+);
+
+// Track current page for loading textures
+let currentPageNumber = 1;
+let totalDocumentPages = 1;
+
+flipbookController.setPageChangeCallback(async (newPage) => {
+  currentPageNumber = newPage + 1; // Convert 0-indexed to 1-indexed
+  await loadCurrentSpread();
+});
+
+async function loadCurrentSpread() {
+  if (!documentId || !token) return;
+
+  const layoutMode = resolveLayout();
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const [leftPageNumber, rightPageNumber] = resolveSpread(currentPageNumber, layoutMode);
+
+  try {
+    const leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale);
+    leftPage.setTexture(leftRender.texture);
+    lastPageSize = { width: leftRender.width, height: leftRender.height };
+
+    if (layoutMode === "double" && rightPageNumber && rightPageNumber <= totalDocumentPages) {
+      const rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale);
+      rightPage.setTexture(rightRender.texture);
+    } else {
+      rightPage.setTexture(null);
+    }
+
+    updateLayout(leftRender.width, leftRender.height, layoutMode);
+  } catch (error) {
+    console.error("Failed to load spread:", error);
+  }
+}
+
+function animate(time: number = 0) {
+  // Update controller (handles physics animation internally)
+  flipbookController.update(time / 1000);
+
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
@@ -298,30 +342,33 @@ async function handleRender() {
   if (!token) return;
   try {
     setStatus("Rasterizing...");
-    const result = await rasterizePage(token, {
-      sessionId,
-      documentId,
-      pageNumber,
-      scale
-    });
-  let layoutMode = resolveLayout();
-  const [leftPageNumber, rightPageNumber] = resolveSpread(pageNumber, layoutMode);
-  if (layoutMode === "double" && !rightPageNumber) {
-    layoutMode = "single";
-  }
-  const leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale);
-  leftPage.setTexture(leftRender.texture);
-  lastPageSize = { width: leftRender.width, height: leftRender.height };
+    currentPageNumber = pageNumber;
 
-  if (layoutMode === "double" && rightPageNumber) {
-    const rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale);
-    rightPage.setTexture(rightRender.texture);
-  }
+    let layoutMode = resolveLayout();
+    const [leftPageNumber, rightPageNumber] = resolveSpread(pageNumber, layoutMode);
+    if (layoutMode === "double" && !rightPageNumber) {
+      layoutMode = "single";
+    }
+    const leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale);
+    leftPage.setTexture(leftRender.texture);
+    lastPageSize = { width: leftRender.width, height: leftRender.height };
+
+    if (layoutMode === "double" && rightPageNumber) {
+      const rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale);
+      rightPage.setTexture(rightRender.texture);
+    }
 
     if (lastPageSize) {
       updateLayout(lastPageSize.width, lastPageSize.height, layoutMode);
+      // Update controller with page dimensions
+      flipbookController.setPageDimensions(lastPageSize.width, lastPageSize.height);
     }
-    setStatus(`Rendered page ${pageNumber}${layoutMode === "double" ? " (spread)" : ""}`);
+
+    // For now, assume 10 pages - this should come from PDF metadata
+    totalDocumentPages = 10;
+    flipbookController.setTotalPages(totalDocumentPages);
+
+    setStatus(`Rendered page ${pageNumber}${layoutMode === "double" ? " (spread)" : ""} - Use arrow keys or drag corners to turn pages`);
   } catch (error) {
     console.error(error);
     setStatus(`Rasterize failed: ${(error as Error).message}`);
