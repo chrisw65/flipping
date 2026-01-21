@@ -14,22 +14,62 @@ const container: HTMLElement = containerElement;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f141a);
 
-// Determine optimal FOV based on viewport class per spec
-function getOptimalFOV(): number {
+/**
+ * Camera configuration per spec Section 3.2.2:
+ * - Book lies flat on XZ plane at origin
+ * - Camera is ABOVE, looking DOWN at the book
+ * - Viewing angle 25-35 degrees from vertical
+ */
+type ViewportClass = "desktop" | "tablet" | "mobile";
+
+interface CameraConfig {
+  position: THREE.Vector3;
+  target: THREE.Vector3;
+  fov: number;
+}
+
+function getViewportClass(): ViewportClass {
   const width = window.innerWidth;
   const aspectRatio = window.innerWidth / window.innerHeight;
   if (aspectRatio > 1.5 && width >= 1200) {
-    return 28; // Desktop landscape: narrow FOV for readable text
+    return "desktop";
   } else if (aspectRatio > 1.0 && width >= 768) {
-    return 32; // Tablet landscape: balanced FOV
+    return "tablet";
   } else {
-    return 38; // Mobile/portrait: wider FOV to show full page
+    return "mobile";
   }
 }
 
-const camera = new THREE.PerspectiveCamera(getOptimalFOV(), 1, 0.1, 100);
-camera.position.set(0, 0, 2.2);
-camera.lookAt(0, 0, 0);
+// Camera positions from spec - above book, looking down
+function getCameraConfig(): CameraConfig {
+  const viewport = getViewportClass();
+  switch (viewport) {
+    case "desktop":
+      return {
+        position: new THREE.Vector3(0, 1.8, 0.85),
+        target: new THREE.Vector3(0, 0.02, 0),
+        fov: 28,
+      };
+    case "tablet":
+      return {
+        position: new THREE.Vector3(0, 1.6, 0.9),
+        target: new THREE.Vector3(0, 0.02, 0),
+        fov: 32,
+      };
+    case "mobile":
+    default:
+      return {
+        position: new THREE.Vector3(0, 1.4, 0.95),
+        target: new THREE.Vector3(0, 0.02, 0),
+        fov: 38,
+      };
+  }
+}
+
+const initialConfig = getCameraConfig();
+const camera = new THREE.PerspectiveCamera(initialConfig.fov, 1, 0.1, 100);
+camera.position.copy(initialConfig.position);
+camera.lookAt(initialConfig.target);
 
 // Renderer configuration optimized for text clarity per spec
 const renderer = new THREE.WebGLRenderer({
@@ -48,22 +88,27 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 container.appendChild(renderer.domElement);
 
+// Create pages - they lie flat on XZ plane per spec
 const leftPage = createPageMesh();
 const rightPage = createPageMesh();
-leftPage.group.position.set(0, 0, 0);
-rightPage.group.position.set(0, 0, 0);
+// Pages positioned at small Y offset above any stack geometry
+leftPage.group.position.set(0, 0.01, 0);
+rightPage.group.position.set(0, 0.01, 0);
 scene.add(leftPage.group);
 scene.add(rightPage.group);
 
+// Spine runs along Z axis at X=0 for horizontal book
 const spineMaterial = new THREE.MeshStandardMaterial({
   color: 0xd6d0c6,
   roughness: 0.75,
   metalness: 0.05
 });
-const spineGeometry = new THREE.BoxGeometry(0.02, 1, 0.02);
+// Spine: thin in X, tall in Y (book thickness), long in Z (page height)
+const spineGeometry = new THREE.BoxGeometry(0.02, 0.02, 1);
 const spine = new THREE.Mesh(spineGeometry, spineMaterial);
 scene.add(spine);
 
+// Edge shadows for book depth effect
 const shadowTexture = createEdgeShadowTexture();
 const shadowMaterial = new THREE.MeshBasicMaterial({
   map: shadowTexture,
@@ -72,19 +117,27 @@ const shadowMaterial = new THREE.MeshBasicMaterial({
   depthWrite: false
 });
 const shadowWidth = 0.02;
-const leftShadow = new THREE.Mesh(new THREE.PlaneGeometry(shadowWidth, 1), shadowMaterial);
-const rightShadow = new THREE.Mesh(new THREE.PlaneGeometry(shadowWidth, 1), shadowMaterial);
-leftShadow.material.side = THREE.DoubleSide;
-rightShadow.material.side = THREE.DoubleSide;
+// Shadows lie flat on XZ plane
+const leftShadowGeo = new THREE.PlaneGeometry(shadowWidth, 1);
+leftShadowGeo.rotateX(-Math.PI / 2); // Lie flat
+const rightShadowGeo = new THREE.PlaneGeometry(shadowWidth, 1);
+rightShadowGeo.rotateX(-Math.PI / 2); // Lie flat
+const leftShadow = new THREE.Mesh(leftShadowGeo, shadowMaterial);
+const rightShadow = new THREE.Mesh(rightShadowGeo, shadowMaterial.clone());
+(rightShadow.material as THREE.MeshBasicMaterial).side = THREE.DoubleSide;
+(leftShadow.material as THREE.MeshBasicMaterial).side = THREE.DoubleSide;
 scene.add(leftShadow);
 scene.add(rightShadow);
+
+const shadowEdgeGeo = new THREE.PlaneGeometry(0.06, 1);
+shadowEdgeGeo.rotateX(-Math.PI / 2);
 const shadowEdge = new THREE.Mesh(
-  new THREE.PlaneGeometry(0.06, 1),
+  shadowEdgeGeo,
   new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, opacity: 0.2 })
 );
-shadowEdge.rotation.y = Math.PI;
 scene.add(shadowEdge);
 
+// Paper stacks under pages (represent unturned pages)
 const paperTexture = createPaperTexture();
 const paperMaterial = new THREE.MeshStandardMaterial({
   color: 0xf2efe7,
@@ -92,34 +145,44 @@ const paperMaterial = new THREE.MeshStandardMaterial({
   metalness: 0.02,
   map: paperTexture
 });
-const stackGeometry = new THREE.BoxGeometry(1, 1, 0.12);
+// Stack geometry: width in X, thickness in Y, depth in Z
+const stackGeometry = new THREE.BoxGeometry(1, 0.02, 1);
 const leftStack = new THREE.Mesh(stackGeometry, paperMaterial);
-const rightStack = new THREE.Mesh(stackGeometry, paperMaterial);
+const rightStack = new THREE.Mesh(stackGeometry, paperMaterial.clone());
 scene.add(leftStack);
 scene.add(rightStack);
 const minimalRender = true;
 
+// Lighting for book lying flat - lights from above
 const ambient = new THREE.AmbientLight(0xffffff, 0.55);
 scene.add(ambient);
 
+// Key light: above and to the side, simulating desk lamp
 const key = new THREE.DirectionalLight(0xffffff, 1.1);
-key.position.set(1.8, 1.6, 2.4);
+key.position.set(1.0, 2.5, 0.5);
 scene.add(key);
 
+// Fill light: softer, from opposite side
 const fill = new THREE.DirectionalLight(0xdfe8f2, 0.5);
-fill.position.set(-1.2, 1.1, 1.6);
+fill.position.set(-0.8, 2.0, 0.8);
 scene.add(fill);
 
+// Rim/back light: from behind to add depth
 const rim = new THREE.DirectionalLight(0xffffff, 0.35);
-rim.position.set(0, -1.4, 1.8);
+rim.position.set(0, 1.5, -1.2);
 scene.add(rim);
 
 function resize() {
   const { clientWidth, clientHeight } = container;
   camera.aspect = clientWidth / clientHeight;
-  // Update FOV based on new viewport dimensions per spec
-  camera.fov = getOptimalFOV();
+
+  // Update camera configuration based on viewport per spec
+  const config = getCameraConfig();
+  camera.fov = config.fov;
+  camera.position.copy(config.position);
+  camera.lookAt(config.target);
   camera.updateProjectionMatrix();
+
   // Update renderer size accounting for DPR
   const dpr = Math.min(window.devicePixelRatio, 2);
   renderer.setPixelRatio(dpr);
@@ -207,63 +270,74 @@ function resolveLayout(): LayoutMode {
   return window.innerWidth < 900 ? "single" : "double";
 }
 
+/**
+ * Update layout for book lying FLAT on XZ plane per spec Section 3.2.2:
+ * - X axis: left/right (page width)
+ * - Y axis: up/down (book thickness)
+ * - Z axis: front/back (page height/depth)
+ * - Spine runs along Z axis at X=0
+ */
 function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
   const aspect = pageWidth / pageHeight;
-  const baseHeight = 1.0;
-  const pageW = baseHeight * aspect;
-  const pageH = baseHeight;
-  const gutter = 0.02; // Small gap at spine
-  const stackDepth = getStackDepth(pageH);
-  const stackScaleZ = stackDepth / 0.12;
+  const baseDepth = 1.0; // Base page depth in Z direction
+  const pageW = baseDepth * aspect; // Page width in X direction
+  const pageD = baseDepth; // Page depth in Z direction
+  const bookThickness = 0.02; // Y direction thickness
+  const pageY = bookThickness / 2 + 0.001; // Pages sit just above book stack
 
   if (mode === "double") {
-    const spreadWidth = pageW * 2 + gutter;
-
-    // Set page sizes and sides
-    leftPage.setSize(pageW, pageH);
-    rightPage.setSize(pageW, pageH);
+    // Set page sizes: width (X) and depth (Z)
+    leftPage.setSize(pageW, pageD);
+    rightPage.setSize(pageW, pageD);
     leftPage.setSide("left");
     rightPage.setSide("right");
 
-    // Position pages: spine is at x=0
-    // Left page extends from x=-pageW to x=0
-    // Right page extends from x=0 to x=pageW
-    leftPage.group.position.set(0, 0, 0.01);
-    rightPage.group.position.set(0, 0, 0.01);
+    // Position pages at spine (X=0), slightly above Y=0
+    leftPage.group.position.set(0, pageY, 0);
+    rightPage.group.position.set(0, pageY, 0);
 
+    // Decorative elements (stacks, spine, shadows)
     leftStack.visible = !minimalRender;
     rightStack.visible = !minimalRender;
     spine.visible = !minimalRender;
     leftShadow.visible = !minimalRender;
     rightShadow.visible = !minimalRender;
     shadowEdge.visible = !minimalRender;
+
     if (!minimalRender) {
-      leftStack.scale.set(pageW, pageH, 1);
-      rightStack.scale.set(pageW, pageH, 1);
-      leftStack.scale.z = stackScaleZ;
-      rightStack.scale.z = stackScaleZ;
-      leftStack.position.set(-pageW / 2, 0, -stackDepth / 2);
-      rightStack.position.set(pageW / 2, 0, -stackDepth / 2);
-      spine.scale.set(1, pageH, stackScaleZ);
+      // Stack under left pages: centered at -pageW/2, below pages
+      leftStack.scale.set(pageW, bookThickness, pageD);
+      leftStack.position.set(-pageW / 2, 0, 0);
+
+      // Stack under right pages: centered at +pageW/2
+      rightStack.scale.set(pageW, bookThickness, pageD);
+      rightStack.position.set(pageW / 2, 0, 0);
+
+      // Spine at X=0, running along Z
+      spine.scale.set(1, bookThickness / 0.02, pageD);
       spine.position.set(0, 0, 0);
-      leftShadow.scale.set(1, pageH, 1);
-      rightShadow.scale.set(1, pageH, 1);
-      leftShadow.position.set(-gutter / 2, 0, 0.02);
-      rightShadow.position.set(gutter / 2, 0, 0.02);
-      rightShadow.rotation.y = Math.PI;
-      shadowEdge.scale.set(1, pageH, 1);
-      shadowEdge.position.set(0, 0, 0.012);
+
+      // Shadows at gutter (spine) area
+      leftShadow.scale.set(1, 1, pageD);
+      rightShadow.scale.set(1, 1, pageD);
+      leftShadow.position.set(-0.01, pageY + 0.001, 0);
+      rightShadow.position.set(0.01, pageY + 0.001, 0);
+      rightShadow.rotation.z = Math.PI;
+
+      shadowEdge.scale.set(1, 1, pageD);
+      shadowEdge.position.set(0, pageY + 0.002, 0);
     }
-    fitCamera(spreadWidth, pageH, mode);
+
     rightPage.group.visible = true;
     leftPage.group.visible = true;
   } else {
     // Single page mode - show as right page (like first page of book)
-    leftPage.setSize(pageW, pageH);
+    leftPage.setSize(pageW, pageD);
     leftPage.setSide("right");
-    leftPage.group.position.set(-pageW / 2, 0, 0);
+    // Position so page is centered (spine edge at X=0, page extends to +X)
+    leftPage.group.position.set(0, pageY, 0);
+
     leftStack.visible = !minimalRender;
-    fitCamera(pageW, pageH, mode);
     rightPage.group.visible = false;
     leftPage.group.visible = true;
     spine.visible = false;
@@ -271,38 +345,16 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     rightStack.visible = false;
     leftShadow.visible = false;
     rightShadow.visible = false;
+
     if (!minimalRender) {
-      leftStack.scale.set(pageW, pageH, 1);
-      leftStack.scale.z = stackScaleZ;
-      leftStack.position.set(0, 0, -stackDepth / 2);
+      leftStack.scale.set(pageW, bookThickness, pageD);
+      leftStack.position.set(pageW / 2, 0, 0);
     }
   }
 }
 
-function fitCamera(width: number, height: number, mode: LayoutMode) {
-  // Per spec: page should occupy ~75% of screen width for optimal readability
-  const targetPageScreenRatio = 0.75;
-  const margin = 1.15; // 15% margin around book per spec
-
-  const vFov = THREE.MathUtils.degToRad(camera.fov);
-  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-
-  // Calculate distance to fit content with margins
-  const contentWidth = width * margin;
-  const contentHeight = height * margin;
-  const distH = contentWidth / (2 * Math.tan(hFov / 2));
-  const distV = contentHeight / (2 * Math.tan(vFov / 2));
-
-  // Ensure readable text: page shouldn't occupy less than target ratio of viewport
-  const minFraction = mode === "double" ? 0.65 : targetPageScreenRatio;
-  const readableDistance = height / (2 * Math.tan(vFov / 2) * minFraction);
-
-  // Choose distance that shows full content while maintaining readability
-  const distance = Math.min(Math.max(distH, distV, 1.0), readableDistance);
-
-  camera.position.set(0, 0, distance);
-  camera.lookAt(0, 0, 0);
-}
+// Camera is positioned by getCameraConfig() based on viewport class per spec
+// No dynamic fitCamera needed - spec defines fixed positions for each viewport
 
 function setStatus(message: string) {
   if (status) {
@@ -553,24 +605,6 @@ function getPageAspect() {
 
 function getQualityPreset(): QualityPreset {
   return (qualitySelect?.value ?? "medium") as QualityPreset;
-}
-
-function getStackDepth(pageHeight: number) {
-  const preset = (document.getElementById("sizeSelect") as HTMLSelectElement | null)?.value as
-    | PageSizePreset
-    | undefined;
-  const base = pageHeight * 0.12;
-  switch (preset) {
-    case "a4":
-      return base * 0.9;
-    case "6x9":
-      return base * 1.05;
-    case "8.5x8.5":
-      return base * 0.85;
-    case "auto":
-    default:
-      return base;
-  }
 }
 
 function resolveSpread(pageNumber: number, mode: LayoutMode): [number, number | null] {

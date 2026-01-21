@@ -14,11 +14,26 @@ export type PageMesh = {
 };
 
 /**
- * Creates a simple page mesh that rotates around the spine
- * Like a real book page turning
+ * Creates a page mesh for a book lying FLAT on the XZ plane.
+ *
+ * Coordinate system per spec Section 3.2.2:
+ * - Book lies flat on XZ plane (horizontal)
+ * - Pages face UP (+Y direction)
+ * - Spine runs along Z axis at X=0
+ * - Right page extends in +X direction
+ * - Left page extends in -X direction
+ * - Page turn rotates around Y axis (the spine)
  */
 export function createPageMesh(): PageMesh {
-  const geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
+  // Create subdivided geometry for potential deformation
+  // Higher subdivision allows for curved page effects
+  const segmentsX = 32;
+  const segmentsZ = 1;
+  const geometry = new THREE.PlaneGeometry(1, 1, segmentsX, segmentsZ);
+
+  // Rotate geometry to lie flat on XZ plane (facing up)
+  // PlaneGeometry defaults to XY plane facing +Z, we need XZ facing +Y
+  geometry.rotateX(-Math.PI / 2);
 
   const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -29,31 +44,33 @@ export function createPageMesh(): PageMesh {
 
   const mesh = new THREE.Mesh(geometry, material);
 
-  // Group for positioning - the mesh rotates within this
+  // Group for positioning - the mesh rotates within this around Y axis
   const group = new THREE.Group();
   group.add(mesh);
 
   let pageSide: "left" | "right" = "right";
   let currentWidth = 1;
-  let currentHeight = 1;
+  let currentHeight = 1; // This is depth on XZ plane (Z direction)
   let isAnimating = false;
+  let turnProgress = 0;
 
   /**
    * Set turn progress: 0 = flat, 1 = fully turned (180 degrees)
-   * Page rotates around its spine edge (the edge at x=0 for right page)
+   * Page rotates around Y axis (spine) at X=0
    */
   const setProgress = (progress: number) => {
-    const clampedProgress = Math.max(0, Math.min(1, progress));
+    turnProgress = Math.max(0, Math.min(1, progress));
 
-    // Rotation angle: 0 to PI (180 degrees)
-    const angle = clampedProgress * Math.PI;
+    // Rotation angle: 0 to PI (180 degrees) around Y axis
+    const angle = turnProgress * Math.PI;
 
     if (pageSide === "right") {
-      // Right page rotates around its left edge (spine)
-      // Pivot is at x=0, so we rotate around Y axis
+      // Right page: starts at angle 0 (flat, extending +X)
+      // Rotates counterclockwise (negative Y rotation) to flip over spine
       mesh.rotation.y = -angle;
     } else {
-      // Left page rotates around its right edge (spine)
+      // Left page: starts at angle 0 (flat, extending -X)
+      // Rotates clockwise (positive Y rotation) to flip over spine
       mesh.rotation.y = angle;
     }
   };
@@ -68,15 +85,16 @@ export function createPageMesh(): PageMesh {
     currentWidth = width;
     currentHeight = height;
 
-    // Scale the mesh
-    mesh.scale.set(width, height, 1);
+    // Scale the mesh - width is X direction, height is Z direction (depth)
+    mesh.scale.set(width, 1, height);
 
-    // Position mesh so its spine edge is at the group origin
+    // Position mesh so its spine edge is at the group origin (X=0)
+    // The mesh pivot needs to be at the spine edge for proper rotation
     if (pageSide === "right") {
-      // Right page: left edge at origin, extends to +x
+      // Right page: left edge (spine) at X=0, extends to +X
       mesh.position.set(width / 2, 0, 0);
     } else {
-      // Left page: right edge at origin, extends to -x
+      // Left page: right edge (spine) at X=0, extends to -X
       mesh.position.set(-width / 2, 0, 0);
     }
   };
@@ -92,6 +110,7 @@ export function createPageMesh(): PageMesh {
   const beginAnimation = () => {
     if (isAnimating) return;
     isAnimating = true;
+    // Raise render order so animating page appears above static pages
     mesh.renderOrder = 10;
   };
 
@@ -104,10 +123,10 @@ export function createPageMesh(): PageMesh {
   const getMaterial = () => material;
 
   const update = (_time: number) => {
-    // No time-based updates needed for simple version
+    // Reserved for future time-based effects (flutter, etc.)
   };
 
-  // Initialize
+  // Initialize as right page
   setSide("right");
 
   return {
