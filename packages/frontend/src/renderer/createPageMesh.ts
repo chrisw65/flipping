@@ -26,16 +26,6 @@ export type PageMesh = {
  * - Page turn rotates around Y axis (the spine)
  */
 export function createPageMesh(): PageMesh {
-  // Create subdivided geometry for potential deformation
-  // Higher subdivision allows for curved page effects
-  const segmentsX = 32;
-  const segmentsZ = 1;
-  const geometry = new THREE.PlaneGeometry(1, 1, segmentsX, segmentsZ);
-
-  // Rotate geometry to lie flat on XZ plane (facing up)
-  // PlaneGeometry defaults to XY plane facing +Z, we need XZ facing +Y
-  geometry.rotateX(-Math.PI / 2);
-
   const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.8,
@@ -43,35 +33,68 @@ export function createPageMesh(): PageMesh {
     side: THREE.DoubleSide,
   });
 
+  // We'll create geometry dynamically when size is set
+  let geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
   const mesh = new THREE.Mesh(geometry, material);
 
-  // Group for positioning - the mesh rotates within this around Y axis
+  // Group for positioning in the scene
   const group = new THREE.Group();
   group.add(mesh);
 
   let pageSide: "left" | "right" = "right";
   let currentWidth = 1;
-  let currentHeight = 1; // This is depth on XZ plane (Z direction)
+  let currentHeight = 1;
   let isAnimating = false;
-  let turnProgress = 0;
+
+  /**
+   * Create geometry with pivot at spine edge.
+   * For right page: pivot at left edge (x=0), page extends to +x
+   * For left page: pivot at right edge (x=0), page extends to -x
+   */
+  const createGeometryWithPivot = (width: number, height: number, side: "left" | "right") => {
+    // Create plane geometry lying flat on XZ plane
+    // PlaneGeometry creates vertices centered at origin, we need to offset them
+    const geo = new THREE.PlaneGeometry(width, height, 1, 1);
+
+    // Rotate to lie flat on XZ plane (face up)
+    geo.rotateX(-Math.PI / 2);
+
+    // Now the plane is on XZ plane, centered at origin
+    // We need to translate so the spine edge is at x=0
+
+    const positions = geo.attributes.position;
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i);
+      if (side === "right") {
+        // Right page: shift so left edge is at x=0, page extends to +x
+        positions.setX(i, x + width / 2);
+      } else {
+        // Left page: shift so right edge is at x=0, page extends to -x
+        positions.setX(i, x - width / 2);
+      }
+    }
+    positions.needsUpdate = true;
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+
+    return geo;
+  };
 
   /**
    * Set turn progress: 0 = flat, 1 = fully turned (180 degrees)
    * Page rotates around Y axis (spine) at X=0
    */
   const setProgress = (progress: number) => {
-    turnProgress = Math.max(0, Math.min(1, progress));
+    const clampedProgress = Math.max(0, Math.min(1, progress));
 
     // Rotation angle: 0 to PI (180 degrees) around Y axis
-    const angle = turnProgress * Math.PI;
+    const angle = clampedProgress * Math.PI;
 
     if (pageSide === "right") {
-      // Right page: starts at angle 0 (flat, extending +X)
-      // Rotates counterclockwise (negative Y rotation) to flip over spine
+      // Right page: rotates counterclockwise (negative Y) to flip over spine to left
       mesh.rotation.y = -angle;
     } else {
-      // Left page: starts at angle 0 (flat, extending -X)
-      // Rotates clockwise (positive Y rotation) to flip over spine
+      // Left page: rotates clockwise (positive Y) to flip over spine to right
       mesh.rotation.y = angle;
     }
   };
@@ -86,23 +109,20 @@ export function createPageMesh(): PageMesh {
     currentWidth = width;
     currentHeight = height;
 
-    // Scale the mesh - width is X direction, height is Z direction (depth)
-    mesh.scale.set(width, 1, height);
-
-    // Position mesh so its spine edge is at the group origin (X=0)
-    // The mesh pivot needs to be at the spine edge for proper rotation
-    if (pageSide === "right") {
-      // Right page: left edge (spine) at X=0, extends to +X
-      mesh.position.set(width / 2, 0, 0);
-    } else {
-      // Left page: right edge (spine) at X=0, extends to -X
-      mesh.position.set(-width / 2, 0, 0);
+    // Dispose old geometry and create new one with proper pivot
+    if (geometry) {
+      geometry.dispose();
     }
+    geometry = createGeometryWithPivot(width, height, pageSide);
+    mesh.geometry = geometry;
+
+    // Mesh stays at origin - the geometry vertices are offset instead
+    mesh.position.set(0, 0, 0);
   };
 
   const setSide = (side: "left" | "right") => {
     pageSide = side;
-    // Re-apply size to update positioning
+    // Re-create geometry with new pivot
     setSize(currentWidth, currentHeight);
     // Reset rotation
     setProgress(0);
@@ -113,7 +133,6 @@ export function createPageMesh(): PageMesh {
   const beginAnimation = () => {
     if (isAnimating) return;
     isAnimating = true;
-    // Raise render order so animating page appears above static pages
     mesh.renderOrder = 10;
   };
 
@@ -126,7 +145,7 @@ export function createPageMesh(): PageMesh {
   const getMaterial = () => material;
 
   const update = (_time: number) => {
-    // Reserved for future time-based effects (flutter, etc.)
+    // Reserved for future time-based effects
   };
 
   // Initialize as right page
