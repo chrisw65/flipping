@@ -16,13 +16,16 @@ export type PageMesh = {
 /**
  * Creates a page mesh for a book lying FLAT on the XZ plane.
  *
- * Coordinate system per spec Section 3.2.2:
- * - Book lies flat on XZ plane (horizontal)
+ * Coordinate system:
+ * - Book lies flat on XZ plane (horizontal, like on a table)
  * - Pages face UP (+Y direction)
  * - Spine runs along Z axis at X=0
  * - Right page extends in +X direction
  * - Left page extends in -X direction
- * - Page turn rotates around Y axis (the spine)
+ *
+ * Page turn rotation:
+ * - Pages rotate around the SPINE (Z axis at X=0)
+ * - This lifts the page up and swings it over to the other side
  */
 export function createPageMesh(): PageMesh {
   const material = new THREE.MeshStandardMaterial({
@@ -32,11 +35,11 @@ export function createPageMesh(): PageMesh {
     side: THREE.DoubleSide,
   });
 
-  // We'll create geometry dynamically when size is set
+  // Create a simple plane - we position it so the spine edge is at origin
   let geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
   const mesh = new THREE.Mesh(geometry, material);
 
-  // Group for positioning in the scene
+  // Group positioned at spine (X=0) - the mesh rotates within the group
   const group = new THREE.Group();
   group.add(mesh);
 
@@ -46,55 +49,84 @@ export function createPageMesh(): PageMesh {
   let isAnimating = false;
 
   /**
-   * Create geometry with pivot at spine edge.
-   * For right page: pivot at left edge (x=0), page extends to +x
-   * For left page: pivot at right edge (x=0), page extends to -x
+   * Create geometry for a page lying flat on XZ plane.
+   * The page is positioned so the spine edge is at the local origin.
    */
-  const createGeometryWithPivot = (width: number, height: number, side: "left" | "right") => {
-    // Create plane geometry lying flat on XZ plane
-    // PlaneGeometry creates vertices centered at origin, we need to offset them
-    const geo = new THREE.PlaneGeometry(width, height, 1, 1);
+  const createPageGeometry = (width: number, height: number, side: "left" | "right") => {
+    // Create plane in XZ orientation (lying flat, facing up)
+    // We'll build it directly in XZ plane instead of rotating XY
+    const geo = new THREE.BufferGeometry();
 
-    // Rotate to lie flat on XZ plane (face up)
-    geo.rotateX(-Math.PI / 2);
+    // For a page lying flat:
+    // - X is the width direction (left-right)
+    // - Y is up (page faces up, thickness negligible)
+    // - Z is the height direction (top-bottom of page, along spine)
 
-    // Now the plane is on XZ plane, centered at origin
-    // We need to translate so the spine edge is at x=0
+    let vertices: number[];
+    let uvs: number[];
 
-    const positions = geo.attributes.position;
-    for (let i = 0; i < positions.count; i++) {
-      const x = positions.getX(i);
-      if (side === "right") {
-        // Right page: shift so left edge is at x=0, page extends to +x
-        positions.setX(i, x + width / 2);
-      } else {
-        // Left page: shift so right edge is at x=0, page extends to -x
-        positions.setX(i, x - width / 2);
-      }
+    if (side === "right") {
+      // Right page: spine at x=0 (left edge), extends to +x
+      // Vertices go from x=0 to x=width, z from -height/2 to +height/2
+      vertices = [
+        0, 0, -height / 2,          // bottom-left (at spine)
+        width, 0, -height / 2,      // bottom-right
+        width, 0, height / 2,       // top-right
+        0, 0, height / 2,           // top-left (at spine)
+      ];
+      // UVs: u goes 0->1 from spine to outer edge, v goes 0->1 bottom to top
+      uvs = [
+        0, 0,  // bottom-left
+        1, 0,  // bottom-right
+        1, 1,  // top-right
+        0, 1,  // top-left
+      ];
+    } else {
+      // Left page: spine at x=0 (right edge), extends to -x
+      vertices = [
+        0, 0, -height / 2,           // bottom-right (at spine)
+        -width, 0, -height / 2,      // bottom-left
+        -width, 0, height / 2,       // top-left
+        0, 0, height / 2,            // top-right (at spine)
+      ];
+      // UVs: flip horizontally so texture reads correctly
+      uvs = [
+        1, 0,  // bottom-right (at spine, but UV flipped)
+        0, 0,  // bottom-left
+        0, 1,  // top-left
+        1, 1,  // top-right (at spine)
+      ];
     }
-    positions.needsUpdate = true;
-    geo.computeBoundingBox();
-    geo.computeBoundingSphere();
+
+    // Two triangles to make the quad
+    const indices = [0, 1, 2, 0, 2, 3];
+
+    geo.setIndex(indices);
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.computeVertexNormals();
 
     return geo;
   };
 
   /**
    * Set turn progress: 0 = flat, 1 = fully turned (180 degrees)
-   * Page rotates around Y axis (spine) at X=0
+   * Page rotates around Z axis (the spine runs along Z)
    */
   const setProgress = (progress: number) => {
     const clampedProgress = Math.max(0, Math.min(1, progress));
 
-    // Rotation angle: 0 to PI (180 degrees) around Y axis
+    // Rotation angle: 0 to PI (180 degrees) around Z axis
     const angle = clampedProgress * Math.PI;
 
     if (pageSide === "right") {
-      // Right page: rotates counterclockwise (negative Y) to flip over spine to left
-      mesh.rotation.y = -angle;
+      // Right page: starts flat (angle 0), rotates to flip over spine
+      // Positive Z rotation lifts the right edge up and over to the left
+      mesh.rotation.z = angle;
     } else {
-      // Left page: rotates clockwise (positive Y) to flip over spine to right
-      mesh.rotation.y = angle;
+      // Left page: starts flat, rotates the opposite direction
+      // Negative Z rotation lifts the left edge up and over to the right
+      mesh.rotation.z = -angle;
     }
   };
 
@@ -108,20 +140,17 @@ export function createPageMesh(): PageMesh {
     currentWidth = width;
     currentHeight = height;
 
-    // Dispose old geometry and create new one with proper pivot
+    // Dispose old geometry and create new one
     if (geometry) {
       geometry.dispose();
     }
-    geometry = createGeometryWithPivot(width, height, pageSide);
+    geometry = createPageGeometry(width, height, pageSide);
     mesh.geometry = geometry;
-
-    // Mesh stays at origin - the geometry vertices are offset instead
-    mesh.position.set(0, 0, 0);
   };
 
   const setSide = (side: "left" | "right") => {
     pageSide = side;
-    // Re-create geometry with new pivot
+    // Re-create geometry for the new side
     setSize(currentWidth, currentHeight);
     // Reset rotation
     setProgress(0);
@@ -142,7 +171,7 @@ export function createPageMesh(): PageMesh {
   const getMaterial = () => material;
 
   const update = (_time: number) => {
-    // Reserved for future time-based effects
+    // Reserved for future effects
   };
 
   // Initialize as right page
