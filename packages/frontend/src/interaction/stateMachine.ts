@@ -33,6 +33,7 @@ export class FlipbookStateMachine {
   private dragData: DragData | null = null;
   private currentPage: number = 0;
   private totalPages: number = 1;
+  private pageStep: number = 1;
 
   constructor(totalPages: number = 1) {
     this.totalPages = totalPages;
@@ -58,12 +59,16 @@ export class FlipbookStateMachine {
     this.totalPages = total;
   }
 
+  setPageStep(step: number): void {
+    this.pageStep = Math.max(1, Math.floor(step));
+  }
+
   canTurnForward(): boolean {
-    return this.currentPage < this.totalPages - 1;
+    return this.currentPage + this.pageStep < this.totalPages;
   }
 
   canTurnBackward(): boolean {
-    return this.currentPage > 0;
+    return this.currentPage - this.pageStep >= 0;
   }
 
   onStateChange(callback: StateChangeCallback): () => void {
@@ -164,9 +169,12 @@ export class FlipbookStateMachine {
   // Called when animation completes
   completeAnimation(direction: "forward" | "backward"): void {
     if (direction === "forward") {
-      this.currentPage = Math.min(this.currentPage + 1, this.totalPages - 1);
+      this.currentPage = Math.min(
+        this.currentPage + this.pageStep,
+        this.totalPages - 1
+      );
     } else {
-      this.currentPage = Math.max(this.currentPage - 1, 0);
+      this.currentPage = Math.max(this.currentPage - this.pageStep, 0);
     }
 
     this.dragData = null;

@@ -55,6 +55,49 @@ async function tryOfficialMuPdf(data: Buffer, pageNumber: number, scale: number)
   }
 }
 
+async function tryOfficialMuPdfPageCount(data: Buffer): Promise<number | null> {
+  try {
+    const mupdf = (await import("mupdf")) as unknown as {
+      Document: {
+        openDocument: (input: Buffer | Uint8Array, mime?: string) => any;
+      };
+    };
+    const doc = mupdf.Document.openDocument(data, "application/pdf");
+    if (typeof doc.countPages === "function") {
+      return doc.countPages();
+    }
+    if (typeof doc.pageCount === "number") {
+      return doc.pageCount;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getDocumentPageCount(documentPath: string): Promise<number> {
+  const data = await import("node:fs/promises").then((fs) => fs.readFile(documentPath));
+  const officialCount = await tryOfficialMuPdfPageCount(data);
+  if (officialCount && Number.isFinite(officialCount)) {
+    return officialCount;
+  }
+  const mupdf = await getMuPdf();
+  const name = `tmp_${path.basename(documentPath)}_${Date.now()}.pdf`;
+  mupdf.FS.writeFile(name, new Uint8Array(data));
+  const doc = mupdf.openDocument(name);
+  const moduleAny = mupdf as unknown as {
+    countPages?: (doc: number) => number;
+    countPagesInDocument?: (doc: number) => number;
+    getPageCount?: (doc: number) => number;
+  };
+  if (typeof moduleAny.countPages === "function") return moduleAny.countPages(doc);
+  if (typeof moduleAny.countPagesInDocument === "function") {
+    return moduleAny.countPagesInDocument(doc);
+  }
+  if (typeof moduleAny.getPageCount === "function") return moduleAny.getPageCount(doc);
+  throw new Error("Unable to determine page count");
+}
+
 export async function rasterizePage(options: RasterizeOptions): Promise<RasterizeResult> {
   const data = await import("node:fs/promises").then((fs) => fs.readFile(options.documentPath));
   const sharp = (await import("sharp")).default;

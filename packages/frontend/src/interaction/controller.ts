@@ -21,6 +21,12 @@ export interface InteractionConfig {
   debug: boolean;
   // Optional debug reporter for on-screen overlay
   debugReporter?: (message: string) => void;
+  // Drag feel
+  dragFeel: "snappy" | "soft";
+  // Gate drag start until resources are ready
+  canStartDrag?: (side: "left" | "right") => boolean;
+  // Prefetch resources on hover
+  onHoverSide?: (side: "left" | "right") => void;
 }
 
 const DEFAULT_CONFIG: InteractionConfig = {
@@ -30,6 +36,9 @@ const DEFAULT_CONFIG: InteractionConfig = {
   edgeHitAreaFraction: 0.12,
   debug: false,
   debugReporter: undefined,
+  dragFeel: "snappy",
+  canStartDrag: undefined,
+  onHoverSide: undefined,
 };
 
 export type PageChangeCallback = (page: number) => void;
@@ -59,15 +68,26 @@ export class FlipbookController {
 
   private isDragging: boolean = false;
   private dragStartX: number = 0;
+  private dragBounds: { minX: number; maxX: number; minY: number; maxY: number } | null =
+    null;
+  private dragPageWidthPx: number = 0;
+  private dragLastX: number = 0;
+  private dragLastTime: number = 0;
+  private dragVelocity: number = 0;
   private dragStartU: number = 0;
   private dragStartTime: number = 0;
   private dragSide: "left" | "right" | null = null;
   private hasExceededThreshold: boolean = false;
+  private dragTargetProgress: number = 0;
+  private dragCurrentProgress: number = 0;
+  private lastUpdateTime: number = 0;
+  private cursorMode: "default" | "grab" | "grabbing" = "default";
 
   private animationFrame: number | null = null;
   private lastTime: number = 0;
 
   private onPageChange: PageChangeCallback | null = null;
+  private onTurnStart: ((direction: "forward" | "backward") => void) | null = null;
 
   constructor(
     container: HTMLElement,
@@ -105,6 +125,22 @@ export class FlipbookController {
     this.onPageChange = callback;
   }
 
+  setPageStep(step: number): void {
+    this.stateMachine.setPageStep(step);
+  }
+
+  setCurrentPage(page: number): void {
+    this.stateMachine.setCurrentPage(page);
+  }
+
+  setTurnStartCallback(callback: (direction: "forward" | "backward") => void): void {
+    this.onTurnStart = callback;
+  }
+
+  setDragFeel(feel: "snappy" | "soft"): void {
+    this.config.dragFeel = feel;
+  }
+
   setPageDimensions(width: number, height: number): void {
     this.pageWidth = width;
     this.pageHeight = height;
@@ -127,6 +163,12 @@ export class FlipbookController {
 
     // Keyboard events
     window.addEventListener("keydown", this.handleKeyDown);
+  }
+
+  private setCursor(mode: "default" | "grab" | "grabbing"): void {
+    if (this.cursorMode === mode) return;
+    this.cursorMode = mode;
+    this.inputTarget.style.cursor = mode;
   }
 
   private setupStateListeners(): void {
@@ -158,6 +200,7 @@ export class FlipbookController {
           this.turningPage = null;
         }
         this.turnDirection = null;
+        this.setCursor("default");
       }
     });
   }
@@ -175,6 +218,46 @@ export class FlipbookController {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const pages = [this.rightPage, this.leftPage].filter((p) => p.mesh.visible);
+
+    this.pointerNdc.set((x / rect.width) * 2 - 1, -(y / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+
+    let bestHit:
+      | {
+          page: PageMesh;
+          u: number;
+          v: number;
+          bounds: { minX: number; maxX: number; minY: number; maxY: number };
+        }
+      | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const page of pages) {
+      const bounds = this.getScreenBounds(page.mesh, rect);
+      if (!bounds) continue;
+      const intersections = this.raycaster.intersectObject(page.mesh, false);
+      if (intersections.length === 0) continue;
+      const hit = intersections[0];
+      if (hit.distance >= bestDistance) continue;
+      const geometry = page.mesh.geometry as THREE.BufferGeometry;
+      if (!geometry.boundingBox) {
+        geometry.computeBoundingBox();
+      }
+      const box = geometry.boundingBox;
+      if (!box) continue;
+      // Use local-space hit position for a stable drag ratio.
+      this.tempVec.copy(hit.point);
+      page.mesh.worldToLocal(this.tempVec);
+      const u =
+        (this.tempVec.x - box.min.x) / Math.max(1e-6, box.max.x - box.min.x);
+      const v =
+        1 - (this.tempVec.z - box.min.z) / Math.max(1e-6, box.max.z - box.min.z);
+      bestDistance = hit.distance;
+      bestHit = { page, u: Math.max(0, Math.min(1, u)), v: Math.max(0, Math.min(1, v)), bounds };
+    }
+
+    if (bestHit) return bestHit;
+
     for (const page of pages) {
       const bounds = this.getScreenBounds(page.mesh, rect);
       if (!bounds) continue;
@@ -183,7 +266,7 @@ export class FlipbookController {
       }
       const u = (x - bounds.minX) / Math.max(bounds.maxX - bounds.minX, 1);
       const v = 1 - (y - bounds.minY) / Math.max(bounds.maxY - bounds.minY, 1);
-      return { page, u, v };
+      return { page, u, v, bounds };
     }
     return null;
   }
@@ -198,10 +281,11 @@ export class FlipbookController {
     }
     const box = geometry.boundingBox;
     if (!box) return null;
-    this.tempVec.set(box.min.x, box.min.y, 0);
-    this.tempVec2.set(box.max.x, box.min.y, 0);
-    this.tempVec3.set(box.min.x, box.max.y, 0);
-    this.tempVec4.set(box.max.x, box.max.y, 0);
+    // Pages lie on the XZ plane; use Z for height instead of Y (thickness)
+    this.tempVec.set(box.min.x, 0, box.min.z);
+    this.tempVec2.set(box.max.x, 0, box.min.z);
+    this.tempVec3.set(box.min.x, 0, box.max.z);
+    this.tempVec4.set(box.max.x, 0, box.max.z);
     const pts = [this.tempVec, this.tempVec2, this.tempVec3, this.tempVec4];
 
     let minX = Number.POSITIVE_INFINITY;
@@ -234,7 +318,14 @@ export class FlipbookController {
   }
 
   private handlePointerDown = (e: PointerEvent): void => {
-    if (this.stateMachine.getState() !== FlipbookState.IDLE) return;
+    const state = this.stateMachine.getState();
+    if (
+      state !== FlipbookState.IDLE &&
+      state !== FlipbookState.HOVER_CORNER_LEFT &&
+      state !== FlipbookState.HOVER_CORNER_RIGHT
+    ) {
+      return;
+    }
 
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const pos = this.getPointerPosition(e);
@@ -265,6 +356,9 @@ export class FlipbookController {
     }
     if (side === "right" && !this.stateMachine.canTurnForward()) return;
     if (side === "left" && !this.stateMachine.canTurnBackward()) return;
+    if (this.config.canStartDrag && !this.config.canStartDrag(side)) {
+      return;
+    }
     if (this.config.debug) {
       const message = `hit: ${zone} ${side} u=${uOuter.toFixed(2)} v=${hit.v.toFixed(2)}`;
       console.log("flipbook: pointerdown start drag", {
@@ -279,12 +373,23 @@ export class FlipbookController {
 
     this.isDragging = true;
     this.dragStartX = pos.x;
+    this.dragLastX = pos.x;
+    this.dragLastTime = performance.now();
+    this.dragVelocity = 0;
+    this.dragBounds = hit.bounds;
+    this.dragPageWidthPx = Math.max(hit.bounds.maxX - hit.bounds.minX, 1);
     this.dragStartU = uOuter;
     this.dragStartTime = performance.now();
     this.dragSide = side;
     this.hasExceededThreshold = false;
+    this.dragTargetProgress = 0;
+    this.dragCurrentProgress = 0;
     this.stateMachine.startDrag(pos.x, pos.y, side);
     this.physics.setPosition(0);
+    if (this.onTurnStart) {
+      this.onTurnStart(side === "right" ? "forward" : "backward");
+    }
+    this.setCursor("grabbing");
     e.preventDefault();
     (e.target as HTMLElement | null)?.setPointerCapture?.(e.pointerId);
   };
@@ -300,11 +405,15 @@ export class FlipbookController {
         const hoverOuterU = hoverSide === "left" ? 1 - hoverHit.u : hoverHit.u;
         if (this.detectHitZone(hoverOuterU, hoverHit.v) !== "none") {
           this.stateMachine.hoverCorner(hoverSide);
+          this.config.onHoverSide?.(hoverSide);
+          this.setCursor("grab");
         } else {
           this.stateMachine.leaveCorner();
+          this.setCursor("default");
         }
       } else {
         this.stateMachine.leaveCorner();
+        this.setCursor("default");
       }
       return;
     }
@@ -316,24 +425,35 @@ export class FlipbookController {
       return;
     }
 
-    const hit = this.getPageHit(e);
-    if (!hit || !this.dragSide) return;
-    const uOuter = this.dragSide === "left" ? 1 - hit.u : hit.u;
+    if (!this.dragSide || !this.dragBounds) return;
     const dragDistance = Math.abs(pos.x - this.dragStartX);
     if (!this.hasExceededThreshold && dragDistance < this.config.dragThreshold) {
       return;
     }
     this.hasExceededThreshold = true;
 
-    const deltaU = Math.max(0, this.dragStartU - uOuter);
-    const maxU = Math.max(this.dragStartU, 0.001);
-    const progress = Math.max(0, Math.min(1, deltaU / maxU));
-
-    this.stateMachine.updateDrag(pos.x, pos.y, progress);
-    this.physics.setPosition(progress);
-    if (this.turningPage) {
-      this.turningPage.setProgress(progress);
+    const signedDrag =
+      this.dragSide === "right" ? this.dragStartX - pos.x : pos.x - this.dragStartX;
+    const ratio = Math.max(0, Math.min(1, signedDrag / this.dragPageWidthPx));
+    let rawProgress = ratio;
+    const feel = this.config.dragFeel;
+    if (feel === "soft") {
+      // Ease in to feel less twitchy at the start.
+      rawProgress = Math.pow(rawProgress, 0.85);
     }
+    const snapThreshold = feel === "snappy" ? 0.18 : 0.08;
+    let target = rawProgress;
+    if (rawProgress < snapThreshold) target = 0;
+    if (rawProgress > 1 - snapThreshold) target = 1;
+    this.dragTargetProgress = target;
+    this.stateMachine.updateDrag(pos.x, pos.y, target);
+
+    const now = performance.now();
+    const dt = Math.max(1, now - this.dragLastTime);
+    const dx = pos.x - this.dragLastX;
+    this.dragVelocity = dx / dt;
+    this.dragLastX = pos.x;
+    this.dragLastTime = now;
   };
 
   private handlePointerUp = (e?: PointerEvent): void => {
@@ -344,6 +464,7 @@ export class FlipbookController {
     if (e) {
       (e.target as HTMLElement | null)?.releasePointerCapture?.(e.pointerId);
     }
+    this.setCursor("default");
 
     const state = this.stateMachine.getState();
     if (
@@ -351,8 +472,13 @@ export class FlipbookController {
       state === FlipbookState.DRAGGING_BACKWARD
     ) {
       const { shouldComplete } = this.stateMachine.endDrag();
+      const feel = this.config.dragFeel;
+      const velocity = this.dragVelocity;
+      const velocityThreshold = feel === "snappy" ? 0.14 : 0.08;
+      const directionSign = this.turnDirection === "forward" ? -1 : 1;
+      const velocityComplete = velocity * directionSign > velocityThreshold;
 
-      if (shouldComplete) {
+      if (shouldComplete || velocityComplete) {
         // Animate to completion (progress = 1)
         this.physics.release(1, 0);
         this.startAnimationLoop();
@@ -381,6 +507,9 @@ export class FlipbookController {
     if (this.stateMachine.getState() !== FlipbookState.IDLE) return false;
     if (!this.stateMachine.canTurnForward()) return false;
 
+    if (this.onTurnStart) {
+      this.onTurnStart("forward");
+    }
     this.stateMachine.turnPage("forward");
     this.physics.setPosition(0);
     this.physics.release(1, 1.5); // Add some initial velocity
@@ -395,6 +524,9 @@ export class FlipbookController {
     if (this.stateMachine.getState() !== FlipbookState.IDLE) return false;
     if (!this.stateMachine.canTurnBackward()) return false;
 
+    if (this.onTurnStart) {
+      this.onTurnStart("backward");
+    }
     this.stateMachine.turnPage("backward");
     this.physics.setPosition(0);
     this.physics.release(1, 1.5);
@@ -463,8 +595,25 @@ export class FlipbookController {
    * Update method to be called in render loop
    */
   update(time: number): void {
+    const delta = this.lastUpdateTime > 0 ? time - this.lastUpdateTime : 0;
+    this.lastUpdateTime = time;
     this.leftPage.update(time);
     this.rightPage.update(time);
+
+    const state = this.stateMachine.getState();
+    if (
+      state === FlipbookState.DRAGGING_FORWARD ||
+      state === FlipbookState.DRAGGING_BACKWARD
+    ) {
+      const feel = this.config.dragFeel;
+      const strength = feel === "snappy" ? 22 : 10;
+      const alpha = delta > 0 ? 1 - Math.exp(-strength * delta) : 1;
+      this.dragCurrentProgress += (this.dragTargetProgress - this.dragCurrentProgress) * alpha;
+      this.physics.setPosition(this.dragCurrentProgress);
+      if (this.turningPage) {
+        this.turningPage.setProgress(this.dragCurrentProgress);
+      }
+    }
   }
 
   /**

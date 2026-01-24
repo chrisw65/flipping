@@ -11,6 +11,7 @@ export type UploadResponse = {
   filename: string;
   size: number;
   addedAt: number;
+  pageCount?: number;
 };
 
 export type RasterizeResponse = {

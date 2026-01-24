@@ -5,6 +5,7 @@ import path from "node:path";
 import { config } from "../config.js";
 import { getSession, insertDocument, listDocuments } from "../services/db.js";
 import { metrics } from "../services/metrics.js";
+import { getDocumentPageCount } from "../services/rasterizer.js";
 
 export async function registerDocumentRoutes(app: FastifyInstance) {
   app.get("/documents", { preHandler: [app.authenticate] }, async (request, reply) => {
@@ -62,12 +63,19 @@ export async function registerDocumentRoutes(app: FastifyInstance) {
       data.file.on("error", reject);
     });
 
+    let pageCount: number | null = null;
+    try {
+      pageCount = await getDocumentPageCount(destPath);
+    } catch (error) {
+      request.log.warn({ error }, "Page count lookup failed");
+    }
     const record = {
       id,
       path: destPath,
       filename: safeName,
       size,
-      addedAt: Date.now()
+      addedAt: Date.now(),
+      pageCount
     };
 
     insertDocument(record);

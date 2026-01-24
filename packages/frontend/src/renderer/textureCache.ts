@@ -6,6 +6,8 @@ export type CachedTexture = {
   width: number;
   height: number;
   lastUsed: number;
+  requestedWidth?: number;
+  requestedHeight?: number;
 };
 
 export class TextureCache {
@@ -27,6 +29,17 @@ export class TextureCache {
   set(key: string, value: CachedTexture) {
     this.items.set(key, value);
     this.evict();
+  }
+
+  delete(key: string) {
+    const item = this.items.get(key);
+    if (!item) return;
+    item.texture.dispose();
+    this.items.delete(key);
+  }
+
+  keys() {
+    return Array.from(this.items.keys());
   }
 
   clear() {

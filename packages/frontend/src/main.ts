@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { createPageMesh } from "./renderer/createPageMesh";
-import { TextureCache } from "./renderer/textureCache";
+import { TextureCache, type CachedTexture } from "./renderer/textureCache";
 import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
 import { FlipbookController } from "./interaction/controller";
 import { createInteractionDebugOverlay } from "./interaction/debugOverlay";
@@ -47,22 +47,22 @@ function getCameraConfig(): CameraConfig {
   switch (viewport) {
     case "desktop":
       return {
-        position: new THREE.Vector3(0, 1.8, 0.85),
+        position: new THREE.Vector3(0, 2.875, 0.4375),
         target: new THREE.Vector3(0, 0.02, 0),
-        fov: 28,
+        fov: 20,
       };
     case "tablet":
       return {
-        position: new THREE.Vector3(0, 1.6, 0.9),
+        position: new THREE.Vector3(0, 2.5, 0.5),
         target: new THREE.Vector3(0, 0.02, 0),
-        fov: 32,
+        fov: 22,
       };
     case "mobile":
     default:
       return {
-        position: new THREE.Vector3(0, 1.4, 0.95),
+        position: new THREE.Vector3(0, 2.25, 0.5625),
         target: new THREE.Vector3(0, 0.02, 0),
-        fov: 38,
+        fov: 26,
       };
   }
 }
@@ -81,22 +81,35 @@ const renderer = new THREE.WebGLRenderer({
   depth: true,
   preserveDrawingBuffer: false // Security: prevents canvas data extraction
 });
-// Cap DPR at 2 for performance while maintaining Retina sharpness
-const dpr = Math.min(window.devicePixelRatio, 2);
+// Cap DPR at 3 to improve text readability on high-DPI displays
+const dpr = Math.min(window.devicePixelRatio, 3);
 renderer.setPixelRatio(dpr);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 container.appendChild(renderer.domElement);
 
 // Create pages - they lie flat on XZ plane per spec
 const leftPage = createPageMesh();
 const rightPage = createPageMesh();
+const underLeftPage = createPageMesh();
+const underRightPage = createPageMesh();
+leftPage.setDepthBias(-0.5);
+rightPage.setDepthBias(-0.5);
+underLeftPage.setDepthBias(1.0);
+underRightPage.setDepthBias(1.0);
 // Pages positioned at small Y offset above any stack geometry
-leftPage.group.position.set(0, 0.01, 0);
-rightPage.group.position.set(0, 0.01, 0);
+leftPage.group.position.set(0, 0.021, 0);
+rightPage.group.position.set(0, 0.021, 0);
+// Keep under pages just below the visible pages but above the stack.
+underLeftPage.group.position.set(0, 0.019, 0);
+underRightPage.group.position.set(0, 0.019, 0);
 scene.add(leftPage.group);
 scene.add(rightPage.group);
+scene.add(underLeftPage.group);
+scene.add(underRightPage.group);
 
 // Spine runs along Z axis at X=0 for horizontal book
 const spineMaterial = new THREE.MeshStandardMaterial({
@@ -138,6 +151,30 @@ const shadowEdge = new THREE.Mesh(
 );
 scene.add(shadowEdge);
 
+// Fold shadows that follow the curling sheet
+const foldInnerShadow = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.25, 1),
+  new THREE.MeshBasicMaterial({
+    map: shadowTexture,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false
+  })
+);
+const foldOuterShadow = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.25, 1),
+  new THREE.MeshBasicMaterial({
+    map: shadowTexture,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false
+  })
+);
+foldInnerShadow.rotation.x = -Math.PI / 2;
+foldOuterShadow.rotation.x = -Math.PI / 2;
+scene.add(foldInnerShadow);
+scene.add(foldOuterShadow);
+
 // Paper stacks under pages (represent unturned pages)
 const paperTexture = createPaperTexture();
 const paperMaterial = new THREE.MeshStandardMaterial({
@@ -152,19 +189,24 @@ const leftStack = new THREE.Mesh(stackGeometry, paperMaterial);
 const rightStack = new THREE.Mesh(stackGeometry, paperMaterial.clone());
 scene.add(leftStack);
 scene.add(rightStack);
-const minimalRender = true;
+const minimalRender = false;
 
 // Lighting for book lying flat - lights from above
-const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+const ambient = new THREE.AmbientLight(0xffffff, 0.7);
 scene.add(ambient);
 
 // Key light: above and to the side, simulating desk lamp
-const key = new THREE.DirectionalLight(0xffffff, 1.1);
+const key = new THREE.DirectionalLight(0xffffff, 0.9);
 key.position.set(1.0, 2.5, 0.5);
+key.castShadow = true;
+key.shadow.mapSize.width = 1024;
+key.shadow.mapSize.height = 1024;
+key.shadow.bias = -0.0002;
+key.shadow.normalBias = 0.02;
 scene.add(key);
 
 // Fill light: softer, from opposite side
-const fill = new THREE.DirectionalLight(0xdfe8f2, 0.5);
+const fill = new THREE.DirectionalLight(0xdfe8f2, 0.45);
 fill.position.set(-0.8, 2.0, 0.8);
 scene.add(fill);
 
@@ -185,7 +227,7 @@ function resize() {
   camera.updateProjectionMatrix();
 
   // Update renderer size accounting for DPR
-  const dpr = Math.min(window.devicePixelRatio, 2);
+  const dpr = Math.min(window.devicePixelRatio, 3);
   renderer.setPixelRatio(dpr);
   renderer.setSize(clientWidth, clientHeight);
 }
@@ -202,6 +244,8 @@ const debugOverlay = debugHit
     })
   : null;
 
+const dragFeelSelectEarly = document.getElementById("dragFeelSelect") as HTMLSelectElement | null;
+
 const flipbookController = new FlipbookController(
   container,
   camera,
@@ -212,16 +256,50 @@ const flipbookController = new FlipbookController(
   {
     debug: debugHit,
     debugReporter: debugOverlay ? debugOverlay.setMessage : undefined,
+    dragFeel: (dragFeelSelectEarly?.value as "snappy" | "soft") ?? "snappy",
+    canStartDrag: (side) => {
+      const direction = side === "right" ? "forward" : "backward";
+      if (!areUnderPagesReady(direction) || !isTurningBackReady(direction)) {
+        void loadUnderSpread(direction);
+        void loadTurningBackTexture(direction);
+        return false;
+      }
+      return true;
+    },
+    onHoverSide: (side) => {
+      const direction = side === "right" ? "forward" : "backward";
+      applyUnderFromCache(direction);
+      void loadTurningBackTexture(direction);
+      void loadUnderSpread(direction);
+      void prefetchAdjacentPages();
+    }
   }
 );
+flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
 
 // Track current page for loading textures
 let currentPageNumber = 1;
 let totalDocumentPages = 1;
+let currentSpreadLeft = 1;
+let underDirection: "forward" | "backward" = "forward";
+let turnDirection: "forward" | "backward" = "forward";
+let spreadRequestId = 0;
+let activeSpreadId = 0;
+let underRequestId = 0;
+let activeUnderId = 0;
 
 flipbookController.setPageChangeCallback(async (newPage) => {
   currentPageNumber = newPage + 1; // Convert 0-indexed to 1-indexed
   await loadCurrentSpread();
+});
+
+flipbookController.setTurnStartCallback((direction) => {
+  underDirection = direction;
+  turnDirection = direction;
+  applyUnderFromCache(direction);
+  updateUnderVisibility(direction);
+  void loadTurningBackTexture(direction);
+  void loadUnderSpread(direction);
 });
 
 async function loadCurrentSpread() {
@@ -229,21 +307,67 @@ async function loadCurrentSpread() {
 
   const layoutMode = resolveLayout();
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
-  const [leftPageNumber, rightPageNumber] = resolveSpread(currentPageNumber, layoutMode);
+  const spread = resolveSpread(currentPageNumber, layoutMode);
+  const leftPageNumber = spread.left;
+  const rightPageNumber = spread.right;
+  currentSpreadLeft = spread.spreadLeft ?? currentPageNumber;
+  const requestId = ++spreadRequestId;
+  activeSpreadId = requestId;
+  const isActive = () => requestId === activeSpreadId;
 
   try {
-    const leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale);
-    leftPage.setTexture(leftRender.texture);
-    lastPageSize = { width: leftRender.width, height: leftRender.height };
-
-    if (layoutMode === "double" && rightPageNumber && rightPageNumber <= totalDocumentPages) {
-      const rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale);
-      rightPage.setTexture(rightRender.texture);
+    let referenceRender: { width: number; height: number } | null = null;
+    const [leftRender, rightRender] = await Promise.all([
+      leftPageNumber ? requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive) : null,
+      layoutMode === "double" && rightPageNumber && rightPageNumber <= totalDocumentPages
+        ? requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive)
+        : null
+    ]);
+    if (!isActive()) return;
+    if (leftRender) {
+      leftPage.setTexture(leftRender.texture);
+      if (rightRender) {
+        leftPage.setBackTexture(rightRender.texture);
+      }
+      referenceRender = { width: leftRender.width, height: leftRender.height };
     } else {
-      rightPage.setTexture(null);
+      leftPage.setTexture(null);
+      leftPage.setBackTexture(null);
     }
 
-    updateLayout(leftRender.width, leftRender.height, layoutMode);
+    if (rightRender) {
+      rightPage.setTexture(rightRender.texture);
+      if (leftRender) {
+        rightPage.setBackTexture(leftRender.texture);
+      }
+      if (!referenceRender) {
+        referenceRender = { width: rightRender.width, height: rightRender.height };
+      }
+    } else {
+      rightPage.setTexture(null);
+      rightPage.setBackTexture(null);
+    }
+
+    if (referenceRender) {
+      updateLayout(referenceRender.width, referenceRender.height, layoutMode);
+    }
+    await loadUnderSpread(underDirection);
+    void preloadDirection("forward");
+    void preloadDirection("backward");
+    const infoSource = leftRender ?? rightRender;
+    if (infoSource) {
+      const reqW = infoSource.requestedWidth ?? 0;
+      const reqH = infoSource.requestedHeight ?? 0;
+      setRenderInfo(
+        reqW && reqH
+          ? `Requested ${reqW}×${reqH}, got ${infoSource.width}×${infoSource.height}`
+          : `Texture ${infoSource.width}×${infoSource.height}`
+      );
+    } else {
+      setRenderInfo("");
+    }
+    void prefetchAdjacentPages();
+    enforcePageCacheWindow();
   } catch (error) {
     console.error("Failed to load spread:", error);
   }
@@ -252,6 +376,7 @@ async function loadCurrentSpread() {
 function animate(time: number = 0) {
   // Update controller (handles physics animation internally)
   flipbookController.update(time / 1000);
+  updateFoldShadows();
   if (debugOverlay) {
     debugOverlay.setPageBounds("left", getScreenBounds(leftPage.mesh));
     debugOverlay.setPageBounds("right", getScreenBounds(rightPage.mesh));
@@ -264,29 +389,36 @@ function animate(time: number = 0) {
 animate();
 
 const status = document.getElementById("status");
+const renderInfo = document.getElementById("renderInfo");
 const fileInput = document.getElementById("fileInput") as HTMLInputElement | null;
 const pageInput = document.getElementById("pageInput") as HTMLInputElement | null;
 const scaleInput = document.getElementById("scaleInput") as HTMLInputElement | null;
 const renderButton = document.getElementById("renderButton") as HTMLButtonElement | null;
 const layoutSelect = document.getElementById("layoutSelect") as HTMLSelectElement | null;
 const qualitySelect = document.getElementById("qualitySelect") as HTMLSelectElement | null;
+const dragFeelSelect = document.getElementById("dragFeelSelect") as HTMLSelectElement | null;
 const debugPreview = document.getElementById("debugPreview") as HTMLImageElement | null;
 
 let sessionId = "";
 let token = "";
 let documentId = "";
 let lastPageSize: { width: number; height: number } | null = null;
-const textureCache = new TextureCache(10);
+const urlTextureCache = new TextureCache(10);
+const pageRenderCache = new TextureCache(16);
+const pageRenderPromises = new Map<string, Promise<CachedTexture | null>>();
 const disableTextureCache = true;
+const pageCacheWindow = 3;
 
 type LayoutMode = "auto" | "single" | "double";
 type PageSizePreset = "auto" | "a4" | "6x9" | "8.5x8.5";
 type QualityPreset = "low" | "medium" | "high";
 
 function resolveLayout(): LayoutMode {
-  const selection = (layoutSelect?.value ?? "auto") as LayoutMode;
+  const selection = (
+    (document.getElementById("layoutSelect") as HTMLSelectElement | null)?.value ?? "auto"
+  ) as LayoutMode;
   if (selection !== "auto") return selection;
-  return window.innerWidth < 900 ? "single" : "double";
+  return getViewportClass() === "mobile" ? "single" : "double";
 }
 
 /**
@@ -302,18 +434,26 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
   const pageW = baseDepth * aspect; // Page width in X direction
   const pageD = baseDepth; // Page depth in Z direction
   const bookThickness = 0.02; // Y direction thickness
-  const pageY = bookThickness / 2 + 0.001; // Pages sit just above book stack
+  // Stack top is at bookThickness, so pages must sit above that.
+  const pageY = bookThickness + 0.001;
 
   if (mode === "double") {
     // Set page sizes: width (X) and depth (Z)
     leftPage.setSize(pageW, pageD);
     rightPage.setSize(pageW, pageD);
+    underLeftPage.setSize(pageW, pageD);
+    underRightPage.setSize(pageW, pageD);
     leftPage.setSide("left");
     rightPage.setSide("right");
+    underLeftPage.setSide("left");
+    underRightPage.setSide("right");
 
     // Position pages at spine (X=0), slightly above Y=0
     leftPage.group.position.set(0, pageY, 0);
     rightPage.group.position.set(0, pageY, 0);
+    // Keep under pages just below the visible pages but above the stack.
+    underLeftPage.group.position.set(0, pageY - 0.002, 0);
+    underRightPage.group.position.set(0, pageY - 0.002, 0);
 
     // Decorative elements (stacks, spine, shadows)
     leftStack.visible = !minimalRender;
@@ -347,8 +487,12 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
       shadowEdge.position.set(0, pageY + 0.002, 0);
     }
 
+    updateStackDepth(pageW, pageD, bookThickness, mode);
+
     rightPage.group.visible = true;
     leftPage.group.visible = true;
+    underLeftPage.group.visible = true;
+    underRightPage.group.visible = true;
   } else {
     // Single page mode - show as right page (like first page of book)
     leftPage.setSize(pageW, pageD);
@@ -356,6 +500,8 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     // Position so page is centered (spine edge at X=0, page extends to +X)
     leftPage.group.position.set(0, pageY, 0);
 
+    underLeftPage.group.visible = false;
+    underRightPage.group.visible = false;
     leftStack.visible = !minimalRender;
     rightPage.group.visible = false;
     leftPage.group.visible = true;
@@ -369,6 +515,8 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
       leftStack.scale.set(pageW, bookThickness, pageD);
       leftStack.position.set(pageW / 2, 0, 0);
     }
+
+    updateStackDepth(pageW, pageD, bookThickness, mode);
   }
 }
 
@@ -378,6 +526,12 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
 function setStatus(message: string) {
   if (status) {
     status.textContent = message;
+  }
+}
+
+function setRenderInfo(message: string) {
+  if (renderInfo) {
+    renderInfo.textContent = message;
   }
 }
 
@@ -403,6 +557,12 @@ async function handleUpload() {
     setStatus("Uploading PDF...");
     const result = await uploadDocument(token, fileInput.files[0]);
     documentId = result.id;
+    urlTextureCache.clear();
+    pageRenderCache.clear();
+    pageRenderPromises.clear();
+    if (typeof result.pageCount === "number" && Number.isFinite(result.pageCount)) {
+      totalDocumentPages = result.pageCount;
+    }
     setStatus(`Uploaded ${result.filename}`);
   } catch (error) {
     console.error(error);
@@ -427,32 +587,77 @@ async function handleRender() {
   try {
     setStatus("Rasterizing...");
     currentPageNumber = pageNumber;
+    if (!Number.isFinite(totalDocumentPages) || totalDocumentPages < 1) {
+      totalDocumentPages = 1;
+    }
+    const requestId = ++spreadRequestId;
+    activeSpreadId = requestId;
+    const isActive = () => requestId === activeSpreadId;
 
     let layoutMode = resolveLayout();
-    const [leftPageNumber, rightPageNumber] = resolveSpread(pageNumber, layoutMode);
-    if (layoutMode === "double" && !rightPageNumber) {
-      layoutMode = "single";
+    const spread = resolveSpread(pageNumber, layoutMode);
+    const leftPageNumber = spread.left;
+    const rightPageNumber = spread.right;
+    currentSpreadLeft = spread.spreadLeft ?? pageNumber;
+    let referenceRender: { width: number; height: number } | null = null;
+    let leftRender: Awaited<ReturnType<typeof requestAndLoadPage>> | null = null;
+    let rightRender: Awaited<ReturnType<typeof requestAndLoadPage>> | null = null;
+
+    if (leftPageNumber) {
+      leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive);
+      if (!isActive() || !leftRender) return;
+      leftPage.setTexture(leftRender.texture);
+      referenceRender = { width: leftRender.width, height: leftRender.height };
+    } else {
+      leftPage.setTexture(null);
+      leftPage.setBackTexture(null);
     }
-    const leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale);
-    leftPage.setTexture(leftRender.texture);
-    lastPageSize = { width: leftRender.width, height: leftRender.height };
 
     if (layoutMode === "double" && rightPageNumber) {
-      const rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale);
+      rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive);
+      if (!isActive() || !rightRender) return;
       rightPage.setTexture(rightRender.texture);
+      if (!referenceRender) {
+        referenceRender = { width: rightRender.width, height: rightRender.height };
+      }
+    } else {
+      rightPage.setTexture(null);
+      rightPage.setBackTexture(null);
     }
 
-    if (lastPageSize) {
-      updateLayout(lastPageSize.width, lastPageSize.height, layoutMode);
+    if (leftRender && rightRender) {
+      leftPage.setBackTexture(rightRender.texture);
+      rightPage.setBackTexture(leftRender.texture);
+    }
+
+    if (referenceRender) {
+      lastPageSize = referenceRender;
+      updateLayout(referenceRender.width, referenceRender.height, layoutMode);
       // Update controller with page dimensions
-      flipbookController.setPageDimensions(lastPageSize.width, lastPageSize.height);
+      flipbookController.setPageDimensions(referenceRender.width, referenceRender.height);
     }
 
-    // For now, assume 10 pages - this should come from PDF metadata
-    totalDocumentPages = 10;
     flipbookController.setTotalPages(totalDocumentPages);
+    flipbookController.setCurrentPage(pageNumber - 1);
 
     setStatus(`Rendered page ${pageNumber}${layoutMode === "double" ? " (spread)" : ""} - Use arrow keys or drag corners to turn pages`);
+    const infoSource = leftRender ?? rightRender;
+    if (infoSource) {
+      const reqW = infoSource.requestedWidth ?? 0;
+      const reqH = infoSource.requestedHeight ?? 0;
+      setRenderInfo(
+        reqW && reqH
+          ? `Requested ${reqW}×${reqH}, got ${infoSource.width}×${infoSource.height}`
+          : `Texture ${infoSource.width}×${infoSource.height}`
+      );
+    } else {
+      setRenderInfo("");
+    }
+    await loadUnderSpread(underDirection);
+    void preloadDirection("forward");
+    void preloadDirection("backward");
+    void prefetchAdjacentPages();
+    enforcePageCacheWindow();
   } catch (error) {
     console.error(error);
     setStatus(`Rasterize failed: ${(error as Error).message}`);
@@ -470,6 +675,13 @@ renderButton?.addEventListener("click", () => {
 layoutSelect?.addEventListener("change", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
+    flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
+  }
+});
+pageInput?.addEventListener("change", () => {
+  const pageNumber = Number.parseInt(pageInput.value, 10);
+  if (Number.isFinite(pageNumber)) {
+    flipbookController.setCurrentPage(pageNumber - 1);
   }
 });
 
@@ -486,15 +698,21 @@ qualitySelect?.addEventListener("change", () => {
   }
 });
 
+dragFeelSelect?.addEventListener("change", () => {
+  const feel = (dragFeelSelect.value as "snappy" | "soft") ?? "snappy";
+  flipbookController.setDragFeel(feel);
+});
+
 window.addEventListener("resize", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
+    flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
   }
 });
 
 async function loadTexture(url: string) {
   if (!disableTextureCache) {
-    const cached = textureCache.get(url);
+    const cached = urlTextureCache.get(url);
     if (cached) {
       return cached;
     }
@@ -512,10 +730,14 @@ async function loadTexture(url: string) {
   // Create texture directly from loaded image - keep it simple
   const texture = new THREE.Texture(image);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = true;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.repeat.set(1, 1);
+  texture.offset.set(0, 0);
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  // Enable mipmaps with trilinear filtering for text clarity per spec
-  texture.generateMipmaps = true;
-  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  // Prefer crisp text over mipmapped blur
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -533,32 +755,68 @@ async function loadTexture(url: string) {
 
   const result = { key: url, texture, width: image.width, height: image.height, lastUsed: Date.now() };
   if (!disableTextureCache) {
-    textureCache.set(url, result);
+    urlTextureCache.set(url, result);
   }
   return result;
 }
 
-async function requestAndLoadPage(pageNumber: number, mode: LayoutMode, scale: number) {
+async function requestAndLoadPage(
+  pageNumber: number,
+  mode: LayoutMode,
+  scale: number,
+  isActive: () => boolean,
+  options?: { allowInactiveCache?: boolean }
+) {
   const desired = getTargetDimensions(mode);
-  const first = await rasterizePage(token, {
-    sessionId,
-    documentId,
-    pageNumber,
-    scale,
-    ...desired
-  });
-  let loaded = await loadTexture(first.url);
-  if (desired.targetWidth && loaded.width < desired.targetWidth * 0.9) {
-    const retry = await rasterizePage(token, {
+  const cacheKey = buildPageCacheKey(pageNumber, mode, scale);
+
+  const cached = pageRenderCache.get(cacheKey);
+  if (cached) return cached;
+
+  const inflight = pageRenderPromises.get(cacheKey);
+  if (inflight) {
+    const result = await inflight;
+    if (!result) return null;
+    return isActive() || options?.allowInactiveCache ? result : null;
+  }
+
+  const promise = (async () => {
+    const first = await rasterizePage(token, {
       sessionId,
       documentId,
       pageNumber,
       scale,
       ...desired
     });
-    loaded = await loadTexture(retry.url);
+    let loaded = await loadTexture(first.url);
+    if (desired.targetWidth && loaded.width < desired.targetWidth * 0.9) {
+      const retry = await rasterizePage(token, {
+        sessionId,
+        documentId,
+        pageNumber,
+        scale,
+        ...desired
+      });
+      loaded = await loadTexture(retry.url);
+    }
+    const cachedValue = {
+      ...loaded,
+      key: cacheKey,
+      requestedWidth: desired.targetWidth,
+      requestedHeight: desired.targetHeight
+    };
+    pageRenderCache.set(cacheKey, cachedValue);
+    return cachedValue;
+  })();
+
+  pageRenderPromises.set(cacheKey, promise);
+  try {
+    const result = await promise;
+    if (!result) return null;
+    return isActive() || options?.allowInactiveCache ? result : null;
+  } finally {
+    pageRenderPromises.delete(cacheKey);
   }
-  return loaded;
 }
 
 function createEdgeShadowTexture() {
@@ -614,10 +872,10 @@ function getScreenBounds(mesh: THREE.Mesh) {
   const box = geometry.boundingBox;
   if (!box) return null;
   const corners = [
-    new THREE.Vector3(box.min.x, box.min.y, 0),
-    new THREE.Vector3(box.max.x, box.min.y, 0),
-    new THREE.Vector3(box.min.x, box.max.y, 0),
-    new THREE.Vector3(box.max.x, box.max.y, 0),
+    new THREE.Vector3(box.min.x, 0, box.min.z),
+    new THREE.Vector3(box.max.x, 0, box.min.z),
+    new THREE.Vector3(box.min.x, 0, box.max.z),
+    new THREE.Vector3(box.max.x, 0, box.max.z),
   ];
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -656,28 +914,374 @@ function getQualityPreset(): QualityPreset {
   return (qualitySelect?.value ?? "medium") as QualityPreset;
 }
 
-function resolveSpread(pageNumber: number, mode: LayoutMode): [number, number | null] {
+function resolveSpread(
+  pageNumber: number,
+  mode: LayoutMode
+): { left: number | null; right: number | null; spreadLeft: number | null } {
   if (mode !== "double") {
-    return [pageNumber, null];
+    return { left: pageNumber, right: null, spreadLeft: pageNumber };
   }
-  if (pageNumber <= 1) {
-    return [1, null];
+  if (pageNumber < 1) {
+    return { left: null, right: null, spreadLeft: null };
   }
-  if (pageNumber % 2 === 0) {
-    return [pageNumber, pageNumber + 1];
+  const spreadLeft = pageNumber % 2 === 0 ? pageNumber - 1 : pageNumber;
+  const right = spreadLeft + 1 <= totalDocumentPages ? spreadLeft + 1 : null;
+  return { left: spreadLeft, right, spreadLeft };
+}
+
+function buildPageCacheKey(pageNumber: number, mode: LayoutMode, scale: number) {
+  const desired = getTargetDimensions(mode);
+  return `${documentId}|${mode}|${pageNumber}|${scale}|${desired.targetWidth ?? "auto"}x${desired.targetHeight ?? "auto"}`;
+}
+
+function getCachedPageRender(pageNumber: number, mode: LayoutMode, scale: number) {
+  if (!documentId) return null;
+  const key = buildPageCacheKey(pageNumber, mode, scale);
+  return pageRenderCache.get(key) ?? null;
+}
+
+function applyUnderFromCache(direction: "forward" | "backward") {
+  if (!documentId || !token) return;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") return;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  let underLeft: number | null = null;
+  let underRight: number | null = null;
+  if (direction === "forward") {
+    underLeft = currentSpreadLeft + 2;
+    underRight = currentSpreadLeft + 3;
+  } else {
+    underLeft = currentSpreadLeft - 2;
+    underRight = currentSpreadLeft - 1;
   }
-  return [pageNumber - 1, pageNumber];
+
+  updateUnderVisibility(direction);
+  const leftCached =
+    underLeft && underLeft >= 1 && underLeft <= totalDocumentPages
+      ? getCachedPageRender(underLeft, layoutMode, scale)
+      : null;
+  const rightCached =
+    underRight && underRight >= 1 && underRight <= totalDocumentPages
+      ? getCachedPageRender(underRight, layoutMode, scale)
+      : null;
+
+  if (leftCached) {
+    underLeftPage.setTexture(leftCached.texture);
+  }
+  if (rightCached) {
+    underRightPage.setTexture(rightCached.texture);
+  }
+  if (leftCached && rightCached) {
+    underLeftPage.setBackTexture(rightCached.texture);
+    underRightPage.setBackTexture(leftCached.texture);
+  }
+
+  if (direction === "forward" && leftCached) {
+    rightPage.setBackTexture(leftCached.texture);
+  } else if (direction === "backward" && rightCached) {
+    leftPage.setBackTexture(rightCached.texture);
+  }
+}
+
+function getUnderPages(direction: "forward" | "backward") {
+  if (direction === "forward") {
+    return { underLeft: currentSpreadLeft + 2, underRight: currentSpreadLeft + 3 };
+  }
+  return { underLeft: currentSpreadLeft - 2, underRight: currentSpreadLeft - 1 };
+}
+
+function updateUnderVisibility(direction: "forward" | "backward") {
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") {
+    underLeftPage.mesh.visible = false;
+    underRightPage.mesh.visible = false;
+    return;
+  }
+  const { underLeft, underRight } = getUnderPages(direction);
+  const showLeft = underLeft >= 1 && underLeft <= totalDocumentPages;
+  const showRight = underRight >= 1 && underRight <= totalDocumentPages;
+  underLeftPage.mesh.visible = showLeft;
+  underRightPage.mesh.visible = showRight;
+}
+
+
+async function loadTurningBackTexture(direction: "forward" | "backward") {
+  if (!documentId || !token) return;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") return;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const targetPage = getTurningBackPage(direction);
+  if (targetPage < 1 || targetPage > totalDocumentPages) return;
+  const render = await requestAndLoadPage(targetPage, layoutMode, scale, () => true, {
+    allowInactiveCache: true,
+  });
+  if (!render) return;
+  if (direction === "forward") {
+    rightPage.setBackTexture(render.texture);
+  } else {
+    leftPage.setBackTexture(render.texture);
+  }
+}
+
+function getTurningBackPage(direction: "forward" | "backward") {
+  return direction === "forward" ? currentSpreadLeft + 2 : currentSpreadLeft - 1;
+}
+
+function areUnderPagesReady(direction: "forward" | "backward") {
+  if (!documentId || !token) return false;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") return true;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  let underLeft: number | null = null;
+  let underRight: number | null = null;
+  if (direction === "forward") {
+    underLeft = currentSpreadLeft + 2;
+    underRight = currentSpreadLeft + 3;
+  } else {
+    underLeft = currentSpreadLeft - 2;
+    underRight = currentSpreadLeft - 1;
+  }
+  const leftReady =
+    !underLeft ||
+    underLeft < 1 ||
+    underLeft > totalDocumentPages ||
+    !!getCachedPageRender(underLeft, layoutMode, scale);
+  const rightReady =
+    !underRight ||
+    underRight < 1 ||
+    underRight > totalDocumentPages ||
+    !!getCachedPageRender(underRight, layoutMode, scale);
+  return leftReady && rightReady;
+}
+
+function isTurningBackReady(direction: "forward" | "backward") {
+  if (!documentId || !token) return false;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") return true;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const targetPage = getTurningBackPage(direction);
+  if (targetPage < 1 || targetPage > totalDocumentPages) return true;
+  return !!getCachedPageRender(targetPage, layoutMode, scale);
+}
+
+async function prefetchAdjacentPages() {
+  if (!documentId || !token) return;
+  const layoutMode = resolveLayout();
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const pages: number[] = [];
+  if (layoutMode === "double") {
+    pages.push(
+      currentSpreadLeft + 2,
+      currentSpreadLeft + 3,
+      currentSpreadLeft - 2,
+      currentSpreadLeft - 1
+    );
+  } else {
+    pages.push(currentPageNumber + 1, currentPageNumber - 1);
+  }
+  const unique = Array.from(new Set(pages)).filter(
+    (page) => page >= 1 && page <= totalDocumentPages
+  );
+  if (unique.length === 0) return;
+  await Promise.all(
+    unique.map((page) =>
+      requestAndLoadPage(page, layoutMode, scale, () => true, {
+        allowInactiveCache: true,
+      })
+    )
+  );
+}
+
+function enforcePageCacheWindow() {
+  if (!documentId) return;
+  const layoutMode = resolveLayout();
+  const base =
+    layoutMode === "double" ? currentSpreadLeft : Math.max(1, currentPageNumber);
+  const minPage = Math.max(1, base - pageCacheWindow);
+  const maxPage = Math.min(totalDocumentPages, base + pageCacheWindow);
+
+  const keys = pageRenderCache.keys();
+  for (const key of keys) {
+    const parts = key.split("|");
+    if (parts.length < 4) continue;
+    const cacheDocId = parts[0];
+    const pageNumber = Number.parseInt(parts[2], 10);
+    if (cacheDocId !== documentId || !Number.isFinite(pageNumber)) {
+      pageRenderCache.delete(key);
+      continue;
+    }
+    if (pageNumber < minPage || pageNumber > maxPage) {
+      pageRenderCache.delete(key);
+    }
+  }
+}
+
+async function loadUnderSpread(direction: "forward" | "backward") {
+  if (!documentId || !token) return;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") {
+    underLeftPage.setTexture(null);
+    underRightPage.setTexture(null);
+    return;
+  }
+  const requestId = ++underRequestId;
+  activeUnderId = requestId;
+  const isActive = () => requestId === activeUnderId;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  let underLeft: number | null = null;
+  let underRight: number | null = null;
+  if (direction === "forward") {
+    underLeft = currentSpreadLeft + 2;
+    underRight = currentSpreadLeft + 3;
+  } else {
+    underLeft = currentSpreadLeft - 2;
+    underRight = currentSpreadLeft - 1;
+  }
+
+  const [leftRender, rightRender] = await Promise.all([
+    !underLeft || underLeft < 1 || underLeft > totalDocumentPages
+      ? Promise.resolve(null)
+      : requestAndLoadPage(underLeft, layoutMode, scale, isActive),
+    !underRight || underRight < 1 || underRight > totalDocumentPages
+      ? Promise.resolve(null)
+      : requestAndLoadPage(underRight, layoutMode, scale, isActive),
+  ]);
+  if (!isActive()) return;
+
+  if (leftRender) {
+    underLeftPage.setTexture(leftRender.texture);
+  } else {
+    underLeftPage.setTexture(null);
+    underLeftPage.setBackTexture(null);
+  }
+
+  if (rightRender) {
+    underRightPage.setTexture(rightRender.texture);
+  } else {
+    underRightPage.setTexture(null);
+    underRightPage.setBackTexture(null);
+  }
+
+  if (leftRender && rightRender) {
+    underLeftPage.setBackTexture(rightRender.texture);
+    underRightPage.setBackTexture(leftRender.texture);
+  } else {
+    underLeftPage.setBackTexture(null);
+    underRightPage.setBackTexture(null);
+  }
+
+  // Ensure the turning page reveals the next/prev page on its back face.
+  if (direction === "forward" && leftRender) {
+    rightPage.setBackTexture(leftRender.texture);
+  } else if (direction === "backward" && rightRender) {
+    leftPage.setBackTexture(rightRender.texture);
+  }
+}
+
+async function preloadDirection(direction: "forward" | "backward") {
+  if (!documentId || !token) return;
+  const layoutMode = resolveLayout();
+  if (layoutMode !== "double") return;
+  const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  let underLeft: number | null = null;
+  let underRight: number | null = null;
+  if (direction === "forward") {
+    underLeft = currentSpreadLeft + 2;
+    underRight = currentSpreadLeft + 3;
+  } else {
+    underLeft = currentSpreadLeft - 2;
+    underRight = currentSpreadLeft - 1;
+  }
+  const [leftRender, rightRender] = await Promise.all([
+    !underLeft || underLeft < 1 || underLeft > totalDocumentPages
+      ? Promise.resolve(null)
+      : requestAndLoadPage(underLeft, layoutMode, scale, () => true, {
+          allowInactiveCache: true,
+        }),
+    !underRight || underRight < 1 || underRight > totalDocumentPages
+      ? Promise.resolve(null)
+      : requestAndLoadPage(underRight, layoutMode, scale, () => true, {
+          allowInactiveCache: true,
+        }),
+  ]);
+
+  if (leftRender) underLeftPage.setTexture(leftRender.texture);
+  if (rightRender) underRightPage.setTexture(rightRender.texture);
+  if (leftRender && rightRender) {
+    underLeftPage.setBackTexture(rightRender.texture);
+    underRightPage.setBackTexture(leftRender.texture);
+  }
+  if (direction === "forward" && leftRender) {
+    rightPage.setBackTexture(leftRender.texture);
+  } else if (direction === "backward" && rightRender) {
+    leftPage.setBackTexture(rightRender.texture);
+  }
+}
+
+function updateStackDepth(pageW: number, pageD: number, baseThickness: number, mode: LayoutMode) {
+  const perPage = 0.0004;
+  let leftCount = 0;
+  let rightCount = 0;
+  if (mode === "double") {
+    leftCount = Math.max(0, currentSpreadLeft - 1);
+    rightCount = Math.max(0, totalDocumentPages - (currentSpreadLeft + 1));
+  } else {
+    leftCount = Math.max(0, currentPageNumber - 1);
+    rightCount = Math.max(0, totalDocumentPages - currentPageNumber);
+  }
+  const leftThickness = Math.min(0.04, Math.max(0.002, leftCount * perPage));
+  const rightThickness = Math.min(0.04, Math.max(0.002, rightCount * perPage));
+
+  if (!minimalRender) {
+    leftStack.scale.set(pageW, leftThickness, pageD);
+    rightStack.scale.set(pageW, rightThickness, pageD);
+    leftStack.position.set(-pageW / 2, leftThickness / 2, 0);
+    rightStack.position.set(pageW / 2, rightThickness / 2, 0);
+  }
+}
+
+function updateFoldShadows() {
+  const turning = turnDirection === "forward" ? rightPage : leftPage;
+  if (!turning.mesh.visible) {
+    foldInnerShadow.visible = false;
+    foldOuterShadow.visible = false;
+    return;
+  }
+  const bounds = getScreenBounds(turning.mesh);
+  if (!bounds) {
+    foldInnerShadow.visible = false;
+    foldOuterShadow.visible = false;
+    return;
+  }
+
+  const angle = turning.getAngle();
+  const t = Math.max(0, Math.min(1, angle / 180));
+  const widthNdc = (bounds.maxX - bounds.minX) / renderer.domElement.clientWidth;
+  const shadowWidth = Math.max(0.05, widthNdc * (1.2 + t));
+  const offset = 0.04 + t * 0.12;
+  const innerOpacity = 0.08 + t * 0.22;
+  const outerOpacity = 0.06 + t * 0.18;
+  const sign = turnDirection === "forward" ? 1 : -1;
+
+  foldInnerShadow.visible = angle > 1;
+  foldOuterShadow.visible = angle > 1;
+  foldInnerShadow.scale.set(shadowWidth, 1, 1);
+  foldOuterShadow.scale.set(shadowWidth, 1, 1);
+  foldInnerShadow.position.set(sign * offset, 0.012, 0);
+  foldOuterShadow.position.set(-sign * offset, 0.011, 0);
+  (foldInnerShadow.material as THREE.MeshBasicMaterial).opacity = innerOpacity;
+  (foldOuterShadow.material as THREE.MeshBasicMaterial).opacity = outerOpacity;
 }
 
 function getTargetDimensions(mode: LayoutMode) {
   if (!lastPageSize) return {};
   const canvasWidth = renderer.domElement.clientWidth;
   const canvasHeight = renderer.domElement.clientHeight;
-  const dpr = Math.min(window.devicePixelRatio, 2);
+  const dpr = Math.min(window.devicePixelRatio, 3);
   const widthForPage = mode === "double" ? canvasWidth * 0.5 : canvasWidth;
   const quality = getQualityPreset();
-  const multiplier = quality === "high" ? 1.6 : quality === "low" ? 1.0 : 1.2;
-  const maxWidth = quality === "high" ? 4200 : quality === "low" ? 2400 : 3600;
+  const multiplier = quality === "high" ? 2.2 : quality === "low" ? 1.2 : 1.6;
+  const maxWidth = quality === "high" ? 5200 : quality === "low" ? 3000 : 4200;
   const baseWidth = widthForPage * dpr * multiplier;
   const targetWidth = Math.min(Math.round(baseWidth), maxWidth);
   const aspect = getPageAspect() ?? lastPageSize.width / lastPageSize.height;

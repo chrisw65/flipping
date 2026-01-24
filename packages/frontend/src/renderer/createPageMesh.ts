@@ -1,17 +1,22 @@
 import * as THREE from "three";
+import { getCurveAngle, updateSheetGeometry } from "./dflipDeform";
 
 export type PageMesh = {
   group: THREE.Group;
   mesh: THREE.Mesh;
   setProgress: (progress: number) => void;
+  setAngle: (angleDeg: number) => void;
+  getAngle: () => number;
   setTexture: (texture: THREE.Texture | null) => void;
+  setBackTexture: (texture: THREE.Texture | null) => void;
   setSize: (width: number, height: number) => void;
   beginAnimation: () => void;
   endAnimation: () => void;
-  getMaterial: () => THREE.MeshStandardMaterial;
+  getMaterial: () => THREE.MeshPhongMaterial;
   update: (time: number) => void;
   setSide: (side: "left" | "right") => void;
   getSide: () => "left" | "right";
+  setDepthBias: (bias: number) => void;
 };
 
 /**
@@ -29,16 +34,11 @@ export type PageMesh = {
  * - This lifts the page up and swings it over to the other side
  */
 export function createPageMesh(): PageMesh {
-  const material = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    roughness: 0.8,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
-
-  // Create a simple plane - we position it so the spine edge is at origin
-  let geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
-  const mesh = new THREE.Mesh(geometry, material);
+  const faceMaterials = createFaceMaterials();
+  let geometry = createSheetGeometry(1, 1, 0.01, 60);
+  const mesh = new THREE.Mesh(geometry, faceMaterials);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
 
   // Group positioned at spine (X=0) - the mesh rotates within the group
   const group = new THREE.Group();
@@ -47,93 +47,84 @@ export function createPageMesh(): PageMesh {
   let pageSide: "left" | "right" = "right";
   let currentWidth = 1;
   let currentHeight = 1;
+  let currentDepth = 0.01;
+  let currentSegments = 60;
   let isAnimating = false;
+  let sheetAngleDeg = 0;
+  let curveAngleDeg = 0;
+  let flexibility = 0.9;
+
+  let frontTexture: THREE.Texture | null = null;
+  let backTexture: THREE.Texture | null = null;
 
   /**
-   * Create geometry for a page lying flat on XZ plane.
-   * The page is positioned so the spine edge is at the local origin.
+   * Create segmented box geometry for a page lying flat on XZ plane.
+   * Width = X, Height = Z, Depth = Y (paper thickness).
    */
-  const createPageGeometry = (width: number, height: number, side: "left" | "right") => {
-    // Create plane in XZ orientation (lying flat, facing up)
-    // We'll build it directly in XZ plane instead of rotating XY
-    const geo = new THREE.BufferGeometry();
+  const createSheet = (width: number, height: number, depth: number, segments: number) =>
+    createSheetGeometry(width, height, depth, segments);
 
-    // For a page lying flat:
-    // - X is the width direction (left-right)
-    // - Y is up (page faces up, thickness negligible)
-    // - Z is the height direction (top-bottom of page, along spine)
+  const applyDeform = () => {
+    const isLeftTurn = pageSide === "right";
+    const curve = getCurveAngle(isLeftTurn, sheetAngleDeg, 0);
+    curveAngleDeg = curve;
 
-    let vertices: number[];
-    let uvs: number[];
+    const result = updateSheetGeometry(geometry, {
+      width: currentWidth,
+      height: currentHeight,
+      depth: currentDepth,
+      segments: currentSegments,
+      sheetAngleDeg,
+      curveAngleDeg,
+      flexibility,
+      isHard: false,
+      orientation: "horizontal",
+      pageOffset: 0.05,
+      pageSide: pageSide === "right" ? 1 : -1,
+    });
 
-    if (side === "right") {
-      // Right page: spine at x=0 (left edge), extends to +x
-      // Vertices go from x=0 to x=width, z from -height/2 to +height/2
-      vertices = [
-        0, 0, -height / 2,          // bottom-left (at spine)
-        width, 0, -height / 2,      // bottom-right
-        width, 0, height / 2,       // top-right
-        0, 0, height / 2,           // top-left (at spine)
-      ];
-      // UVs: u goes 0->1 from spine to outer edge, v goes 0->1 bottom to top
-      uvs = [
-        0, 0,  // bottom-left
-        1, 0,  // bottom-right
-        1, 1,  // top-right
-        0, 1,  // top-left
-      ];
-    } else {
-      // Left page: spine at x=0 (right edge), extends to -x
-      vertices = [
-        0, 0, -height / 2,           // bottom-right (at spine)
-        -width, 0, -height / 2,      // bottom-left
-        -width, 0, height / 2,       // top-left
-        0, 0, height / 2,            // top-right (at spine)
-      ];
-      // UVs: flip horizontally so texture reads correctly
-      uvs = [
-        1, 0,  // bottom-right (at spine, but UV flipped)
-        0, 0,  // bottom-left
-        0, 1,  // top-left
-        1, 1,  // top-right (at spine)
-      ];
-    }
-
-    // Two triangles to make the quad
-    const indices = [0, 1, 2, 0, 2, 3];
-
-    geo.setIndex(indices);
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    geo.computeVertexNormals();
-
-    return geo;
+    mesh.position.copy(result.positionOffset);
+    mesh.scale.x = result.scaleX;
   };
 
   /**
    * Set turn progress: 0 = flat, 1 = fully turned (180 degrees)
-   * Page rotates around Z axis (the spine runs along Z)
+   * Uses deformable sheet geometry for curl realism.
    */
   const setProgress = (progress: number) => {
     const clampedProgress = Math.max(0, Math.min(1, progress));
-
-    // Rotation angle: 0 to PI (180 degrees) around Z axis
-    const angle = clampedProgress * Math.PI;
-
-    if (pageSide === "right") {
-      // Right page: starts flat (angle 0), rotates to flip over spine
-      // Positive Z rotation lifts the right edge up and over to the left
-      mesh.rotation.z = angle;
-    } else {
-      // Left page: starts flat, rotates the opposite direction
-      // Negative Z rotation lifts the left edge up and over to the right
-      mesh.rotation.z = -angle;
-    }
+    setAngle(clampedProgress * 180);
   };
 
   const setTexture = (texture: THREE.Texture | null) => {
-    material.map = texture;
-    material.needsUpdate = true;
+    frontTexture = texture;
+    for (const mat of faceMaterials) {
+      (mat as THREE.MeshPhongMaterial).map = texture ?? null;
+      mat.needsUpdate = true;
+    }
+  };
+
+  const setDepthBias = (bias: number) => {
+    for (const mat of faceMaterials) {
+      const m = mat as THREE.MeshPhongMaterial;
+      if (bias !== 0) {
+        m.polygonOffset = true;
+        m.polygonOffsetFactor = bias;
+        m.polygonOffsetUnits = bias;
+      } else {
+        m.polygonOffset = false;
+        m.polygonOffsetFactor = 0;
+        m.polygonOffsetUnits = 0;
+      }
+      m.needsUpdate = true;
+    }
+  };
+
+  const setBackTexture = (texture: THREE.Texture | null) => {
+    backTexture = texture;
+    const back = faceMaterials[4] as THREE.MeshPhongMaterial;
+    back.map = texture;
+    back.needsUpdate = true;
   };
 
   const setSize = (width: number, height: number) => {
@@ -145,8 +136,9 @@ export function createPageMesh(): PageMesh {
     if (geometry) {
       geometry.dispose();
     }
-    geometry = createPageGeometry(width, height, pageSide);
+    geometry = createSheet(width, height, currentDepth, currentSegments);
     mesh.geometry = geometry;
+    applyDeform();
   };
 
   const setSide = (side: "left" | "right") => {
@@ -158,6 +150,12 @@ export function createPageMesh(): PageMesh {
   };
 
   const getSide = () => pageSide;
+
+  const setAngle = (angleDeg: number) => {
+    sheetAngleDeg = Math.max(0, Math.min(180, angleDeg));
+    applyDeform();
+  };
+  const getAngle = () => sheetAngleDeg;
 
   const beginAnimation = () => {
     if (isAnimating) return;
@@ -171,7 +169,7 @@ export function createPageMesh(): PageMesh {
     mesh.renderOrder = 1;
   };
 
-  const getMaterial = () => material;
+  const getMaterial = () => faceMaterials[5] as THREE.MeshPhongMaterial;
 
   const update = (_time: number) => {
     // Reserved for future effects
@@ -184,7 +182,10 @@ export function createPageMesh(): PageMesh {
     group,
     mesh,
     setProgress,
+    setAngle,
+    getAngle,
     setTexture,
+    setBackTexture,
     setSize,
     beginAnimation,
     endAnimation,
@@ -192,5 +193,113 @@ export function createPageMesh(): PageMesh {
     update,
     setSide,
     getSide,
+    setDepthBias,
   };
+}
+
+function createSheetGeometry(
+  width: number,
+  height: number,
+  depth: number,
+  segments: number
+): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  const E = Math.max(segments + 1, 2);
+  const count = E * 4;
+  const positions = new Float32Array(count * 3);
+  const uvs = new Float32Array(count * 2);
+
+  const yFront = depth / 2;
+  const yBack = -depth / 2;
+  const zTop = height / 2;
+  const zBottom = -height / 2;
+
+  const frontTop = 0;
+  const frontBottom = E;
+  const backTop = E * 2;
+  const backBottom = E * 3;
+
+  for (let i = 0; i < E; i++) {
+    const u = i / (E - 1);
+    const x = width * u;
+
+    setVertex(positions, frontTop + i, x, yFront, zTop);
+    setVertex(positions, frontBottom + i, x, yFront, zBottom);
+    setVertex(positions, backTop + i, x, yBack, zTop);
+    setVertex(positions, backBottom + i, x, yBack, zBottom);
+
+    setUv(uvs, frontTop + i, u, 0);
+    setUv(uvs, frontBottom + i, u, 1);
+    setUv(uvs, backTop + i, 1 - u, 0);
+    setUv(uvs, backBottom + i, 1 - u, 1);
+  }
+
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+
+  const indices: number[] = [];
+  for (let i = 0; i < E - 1; i++) {
+    const a = frontTop + i;
+    const b = frontTop + i + 1;
+    const c = frontBottom + i;
+    const d = frontBottom + i + 1;
+    indices.push(a, c, b, b, c, d);
+  }
+
+  const frontCount = indices.length;
+  for (let i = 0; i < E - 1; i++) {
+    const a = backTop + i;
+    const b = backTop + i + 1;
+    const c = backBottom + i;
+    const d = backBottom + i + 1;
+    indices.push(a, b, c, b, d, c);
+  }
+
+  geo.setIndex(indices);
+  geo.clearGroups();
+  geo.addGroup(0, frontCount, 5);
+  geo.addGroup(frontCount, indices.length - frontCount, 4);
+  geo.userData.layout = { E, frontTop, frontBottom, backTop, backBottom };
+
+  geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+function setVertex(
+  positions: Float32Array,
+  index: number,
+  x: number,
+  y: number,
+  z: number
+) {
+  const p = index * 3;
+  positions[p] = x;
+  positions[p + 1] = y;
+  positions[p + 2] = z;
+}
+
+function setUv(uvs: Float32Array, index: number, u: number, v: number) {
+  const t = index * 2;
+  uvs[t] = u;
+  uvs[t + 1] = v;
+}
+
+function createFaceMaterials(): THREE.Material[] {
+  const base = {
+    color: 0xffffff,
+    shininess: 6,
+    specular: 0x111111,
+    emissive: 0x050505,
+  };
+  const materials: THREE.MeshPhongMaterial[] = [];
+  for (let i = 0; i < 6; i++) {
+    materials.push(new THREE.MeshPhongMaterial({ ...base }));
+  }
+  materials[4].color = new THREE.Color(0xf2efe7);
+  materials[4].side = THREE.DoubleSide;
+  materials[5].color = new THREE.Color(0xffffff);
+  materials[5].side = THREE.DoubleSide;
+  return materials;
 }

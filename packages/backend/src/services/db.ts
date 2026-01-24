@@ -12,6 +12,7 @@ export type DocumentRecord = {
   filename: string;
   size: number;
   addedAt: number;
+  pageCount?: number | null;
 };
 
 let db: Database.Database | null = null;
@@ -32,7 +33,8 @@ export function initDb(path: string) {
       path TEXT NOT NULL,
       filename TEXT NOT NULL,
       size INTEGER NOT NULL,
-      added_at INTEGER NOT NULL
+      added_at INTEGER NOT NULL,
+      page_count INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS events (
@@ -44,6 +46,11 @@ export function initDb(path: string) {
       created_at INTEGER NOT NULL
     );
   `);
+  try {
+    db.exec(`ALTER TABLE documents ADD COLUMN page_count INTEGER`);
+  } catch {
+    // Column already exists.
+  }
   return db;
 }
 
@@ -66,22 +73,26 @@ export function getSession(sessionId: string) {
 export function insertDocument(record: DocumentRecord) {
   if (!db) throw new Error("DB not initialized");
   db.prepare(
-    `INSERT INTO documents (id, path, filename, size, added_at)
-     VALUES (@id, @path, @filename, @size, @addedAt)`
+    `INSERT INTO documents (id, path, filename, size, added_at, page_count)
+     VALUES (@id, @path, @filename, @size, @addedAt, @pageCount)`
   ).run(record);
 }
 
 export function listDocuments() {
   if (!db) throw new Error("DB not initialized");
   return db
-    .prepare(`SELECT id, path, filename, size, added_at AS addedAt FROM documents ORDER BY added_at DESC`)
+    .prepare(
+      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount FROM documents ORDER BY added_at DESC`
+    )
     .all() as DocumentRecord[];
 }
 
 export function getDocument(id: string) {
   if (!db) throw new Error("DB not initialized");
   return db
-    .prepare(`SELECT id, path, filename, size, added_at AS addedAt FROM documents WHERE id = ?`)
+    .prepare(
+      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount FROM documents WHERE id = ?`
+    )
     .get(id) as DocumentRecord | undefined;
 }
 
