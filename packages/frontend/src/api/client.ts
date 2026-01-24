@@ -12,12 +12,36 @@ export type UploadResponse = {
   size: number;
   addedAt: number;
   pageCount?: number;
+  preprocessingStarted?: boolean;
 };
 
 export type RasterizeResponse = {
   url: string;
   width: number;
   height: number;
+};
+
+export type Resolution = "thumbnail" | "standard" | "high";
+
+export type PageMetadata = {
+  page: number;
+  width: number;
+  height: number;
+  aspect: number;
+};
+
+export type DocumentStatus = {
+  id: string;
+  filename: string;
+  pageCount: number | null;
+  preprocessed: boolean;
+  preprocessingProgress: number;
+  preprocessingError: string | null;
+  metadata: {
+    pageCount: number;
+    pages: PageMetadata[];
+    resolutions: Resolution[];
+  } | null;
 };
 
 export async function createSession(): Promise<SessionResponse> {
@@ -83,6 +107,49 @@ export async function fetchImageBlob(token: string, url: string): Promise<Blob> 
   });
   if (!res.ok) {
     throw new Error(`Image fetch failed (${res.status})`);
+  }
+  return res.blob();
+}
+
+/**
+ * Get document status including preprocessing progress
+ */
+export async function getDocumentStatus(token: string, documentId: string): Promise<DocumentStatus> {
+  const res = await fetch(`${baseUrl}/documents/${documentId}/status`, {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+  if (!res.ok) {
+    throw new Error(`Status fetch failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * Fetch a preprocessed page as a blob
+ * Returns null if not preprocessed yet
+ */
+export async function fetchPreprocessedPage(
+  token: string,
+  documentId: string,
+  pageNumber: number,
+  resolution: Resolution = "standard"
+): Promise<Blob | null> {
+  const res = await fetch(
+    `${baseUrl}/documents/${documentId}/pages/${pageNumber}/${resolution}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    }
+  );
+  if (res.status === 409) {
+    // Document not preprocessed yet
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(`Preprocessed page fetch failed (${res.status})`);
   }
   return res.blob();
 }

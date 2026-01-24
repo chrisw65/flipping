@@ -1,7 +1,15 @@
 import * as THREE from "three";
 import { createPageMesh } from "./renderer/createPageMesh";
 import { TextureCache, type CachedTexture } from "./renderer/textureCache";
-import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
+import {
+  createSession,
+  fetchImageBlob,
+  fetchPreprocessedPage,
+  getDocumentStatus,
+  rasterizePage,
+  uploadDocument,
+  type Resolution
+} from "./api/client";
 import { FlipbookController } from "./interaction/controller";
 import { FlipbookState } from "./interaction/stateMachine";
 import { createInteractionDebugOverlay } from "./interaction/debugOverlay";
@@ -587,6 +595,7 @@ const hideUnderPagesToggle = document.getElementById("hideUnderPagesToggle") as 
 let sessionId = "";
 let token = "";
 let documentId = "";
+let isDocumentPreprocessed = false;
 let lastPageSize: { width: number; height: number } | null = null;
 let hideTurningFrontFace = false;
 let lastTurnDirection: "forward" | "backward" | null = null;
@@ -743,17 +752,67 @@ async function handleUpload() {
     setStatus("Uploading PDF...");
     const result = await uploadDocument(token, fileInput.files[0]);
     documentId = result.id;
+    isDocumentPreprocessed = false;
     urlTextureCache.clear();
     pageRenderCache.clear();
     pageRenderPromises.clear();
     if (typeof result.pageCount === "number" && Number.isFinite(result.pageCount)) {
       totalDocumentPages = result.pageCount;
     }
-    setStatus(`Uploaded ${result.filename}`);
+    setStatus(`Uploaded ${result.filename} - preprocessing...`);
+
+    // Poll for preprocessing completion in background
+    if (result.preprocessingStarted) {
+      pollPreprocessingStatus(result.id);
+    }
   } catch (error) {
     console.error(error);
     setStatus(`Upload failed: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Poll for preprocessing status and update when complete
+ */
+async function pollPreprocessingStatus(docId: string) {
+  const maxAttempts = 120; // 2 minutes max
+  const pollInterval = 1000; // 1 second
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (documentId !== docId) {
+      // Document changed, stop polling
+      return;
+    }
+
+    try {
+      const status = await getDocumentStatus(token, docId);
+
+      if (status.preprocessed) {
+        isDocumentPreprocessed = true;
+        if (status.pageCount) {
+          totalDocumentPages = status.pageCount;
+        }
+        setStatus(`Ready - ${status.pageCount} pages preprocessed`);
+        // Clear cache to force reload with preprocessed pages
+        pageRenderCache.clear();
+        return;
+      }
+
+      if (status.preprocessingError) {
+        setStatus(`Preprocessing failed: ${status.preprocessingError}`);
+        return;
+      }
+
+      // Update progress
+      setStatus(`Preprocessing: ${status.preprocessingProgress}%`);
+    } catch (error) {
+      console.warn("Failed to check preprocessing status:", error);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+
+  setStatus("Preprocessing taking longer than expected - pages will load on demand");
 }
 
 async function handleRender() {
@@ -990,6 +1049,40 @@ async function loadTexture(url: string) {
   return result;
 }
 
+/**
+ * Choose the best preprocessed resolution based on target dimensions
+ */
+function chooseResolution(targetWidth: number | undefined): Resolution {
+  if (!targetWidth || targetWidth <= 200) return "thumbnail";
+  if (targetWidth <= 1024) return "standard";
+  return "high";
+}
+
+/**
+ * Load a texture from a blob
+ */
+async function loadTextureFromBlob(blob: Blob): Promise<{
+  texture: THREE.Texture;
+  width: number;
+  height: number;
+}> {
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = url;
+    });
+    const texture = new THREE.Texture(image);
+    texture.needsUpdate = true;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return { texture, width: image.width, height: image.height };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function requestAndLoadPage(
   pageNumber: number,
   mode: LayoutMode,
@@ -1014,24 +1107,47 @@ async function requestAndLoadPage(
   }
 
   const promise = (async () => {
-    const first = await rasterizePage(token, {
-      sessionId,
-      documentId,
-      pageNumber,
-      scale,
-      ...desired
-    });
-    let loaded = await loadTexture(first.url);
-    if (desired.targetWidth && loaded.width < desired.targetWidth * 0.9) {
-      const retry = await rasterizePage(token, {
+    let loaded: { texture: THREE.Texture; width: number; height: number };
+
+    // Try preprocessed page first if document is preprocessed
+    if (isDocumentPreprocessed) {
+      const resolution = chooseResolution(desired.targetWidth);
+      const blob = await fetchPreprocessedPage(token, documentId, pageNumber, resolution);
+      if (blob) {
+        loaded = await loadTextureFromBlob(blob);
+      } else {
+        // Fall back to on-demand rasterization
+        const first = await rasterizePage(token, {
+          sessionId,
+          documentId,
+          pageNumber,
+          scale,
+          ...desired
+        });
+        loaded = await loadTexture(first.url);
+      }
+    } else {
+      // Document not preprocessed, use on-demand rasterization
+      const first = await rasterizePage(token, {
         sessionId,
         documentId,
         pageNumber,
         scale,
         ...desired
       });
-      loaded = await loadTexture(retry.url);
+      loaded = await loadTexture(first.url);
+      if (desired.targetWidth && loaded.width < desired.targetWidth * 0.9) {
+        const retry = await rasterizePage(token, {
+          sessionId,
+          documentId,
+          pageNumber,
+          scale,
+          ...desired
+        });
+        loaded = await loadTexture(retry.url);
+      }
     }
+
     loaded.texture.userData = {
       ...(loaded.texture.userData ?? {}),
       pageNumber,
