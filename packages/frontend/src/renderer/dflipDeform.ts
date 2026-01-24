@@ -138,9 +138,11 @@ export function updateSheetGeometry(
       setVertex(pos, layout.backTop + r, bx, yBack + back.z, halfHeight);
       setVertex(pos, layout.backBottom + r, bx, yBack + back.z, -halfHeight);
 
-      // Keep readable orientation: u=0 at the spine for right pages, u=0 at the outer edge for left pages
+      // UV mapping: front face is side-dependent, back face uses consistent mapping
+      // Front: right pages have U=0 at spine, left pages have U=0 at outer edge
+      // Back: always U=0 at outer edge so revealed back shows text correctly
       const uFront = params.pageSide > 0 ? 1 - uArc : uArc;
-      const uBack = params.pageSide > 0 ? uArc : 1 - uArc;
+      const uBack = uArc;
       setUv(uv, layout.frontTop + r, uFront, 0);
       setUv(uv, layout.frontBottom + r, uFront, 1);
       setUv(uv, layout.backTop + r, uBack, 0);
