@@ -138,12 +138,9 @@ export function updateSheetGeometry(
       setVertex(pos, layout.backTop + r, bx, yBack + back.z, halfHeight);
       setVertex(pos, layout.backBottom + r, bx, yBack + back.z, -halfHeight);
 
-      // UV mapping: use same arc-length UV for both front and back faces
-      // This keeps front and back synchronized as the page curls
-      // Front: right pages have U=0 at spine, left pages have U=0 at outer edge
-      // Back: same direction as front (U=0 at outer edge) for correct texture display
+      // UV mapping: keep readable orientation by page side.
       const uFront = params.pageSide > 0 ? 1 - uArc : uArc;
-      const uBack = uArc;  // Use front curve's arc length for consistency
+      const uBack = params.pageSide > 0 ? uArc : 1 - uArc;
       setUv(uv, layout.frontTop + r, uFront, 0);
       setUv(uv, layout.frontBottom + r, uFront, 1);
       setUv(uv, layout.backTop + r, uBack, 0);

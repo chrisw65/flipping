@@ -88,6 +88,9 @@ export class FlipbookController {
 
   private onPageChange: PageChangeCallback | null = null;
   private onTurnStart: ((direction: "forward" | "backward") => void) | null = null;
+  private onStateChangeExternal:
+    | ((oldState: FlipbookState, newState: FlipbookState) => void)
+    | null = null;
 
   constructor(
     container: HTMLElement,
@@ -137,6 +140,12 @@ export class FlipbookController {
     this.onTurnStart = callback;
   }
 
+  setStateChangeCallback(
+    callback: (oldState: FlipbookState, newState: FlipbookState) => void
+  ): void {
+    this.onStateChangeExternal = callback;
+  }
+
   setDragFeel(feel: "snappy" | "soft"): void {
     this.config.dragFeel = feel;
   }
@@ -173,6 +182,9 @@ export class FlipbookController {
 
   private setupStateListeners(): void {
     this.stateMachine.onStateChange((oldState, newState) => {
+      if (this.onStateChangeExternal) {
+        this.onStateChangeExternal(oldState, newState);
+      }
       if (
         newState === FlipbookState.DRAGGING_FORWARD ||
         newState === FlipbookState.ANIMATING_FORWARD

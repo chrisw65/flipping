@@ -3,6 +3,7 @@ import { createPageMesh } from "./renderer/createPageMesh";
 import { TextureCache, type CachedTexture } from "./renderer/textureCache";
 import { createSession, fetchImageBlob, rasterizePage, uploadDocument } from "./api/client";
 import { FlipbookController } from "./interaction/controller";
+import { FlipbookState } from "./interaction/stateMachine";
 import { createInteractionDebugOverlay } from "./interaction/debugOverlay";
 
 const containerElement = document.getElementById("app");
@@ -312,9 +313,71 @@ flipbookController.setPageChangeCallback(async (newPage) => {
   await loadCurrentSpread();
 });
 
+flipbookController.setStateChangeCallback((oldState, newState) => {
+  const dragging =
+    newState === FlipbookState.DRAGGING_FORWARD ||
+    newState === FlipbookState.ANIMATING_FORWARD ||
+    newState === FlipbookState.DRAGGING_BACKWARD ||
+    newState === FlipbookState.ANIMATING_BACKWARD;
+
+  if (hideTurningFrontFace) {
+    if (
+      newState === FlipbookState.DRAGGING_FORWARD ||
+      newState === FlipbookState.ANIMATING_FORWARD
+    ) {
+      rightPage.setFrontVisible(false);
+    } else if (
+      newState === FlipbookState.DRAGGING_BACKWARD ||
+      newState === FlipbookState.ANIMATING_BACKWARD
+    ) {
+      leftPage.setFrontVisible(false);
+    }
+  }
+
+  if (dragging) {
+    if (
+      newState === FlipbookState.DRAGGING_FORWARD ||
+      newState === FlipbookState.ANIMATING_FORWARD
+    ) {
+      rightPage.setFrontBiasDelta(turningFrontBiasDelta);
+      rightPage.setFrontDepthWrite(false);
+    } else if (
+      newState === FlipbookState.DRAGGING_BACKWARD ||
+      newState === FlipbookState.ANIMATING_BACKWARD
+    ) {
+      leftPage.setFrontBiasDelta(turningFrontBiasDelta);
+      leftPage.setFrontDepthWrite(false);
+    }
+  }
+
+  if (hideUnderPagesDuringDrag && dragging) {
+    underLeftPage.mesh.visible = false;
+    underRightPage.mesh.visible = false;
+  }
+
+  if (newState === FlipbookState.IDLE && oldState !== FlipbookState.IDLE) {
+    leftPage.setFrontVisible(true);
+    rightPage.setFrontVisible(true);
+    leftPage.setFrontBiasDelta(0);
+    rightPage.setFrontBiasDelta(0);
+    leftPage.setFrontDepthWrite(true);
+    rightPage.setFrontDepthWrite(true);
+    updateUnderVisibility(underDirection);
+  }
+});
+
 flipbookController.setTurnStartCallback((direction) => {
+  logTurnDebug(direction);
   underDirection = direction;
   turnDirection = direction;
+  lastTurnDirection = direction;
+  if (hideTurningFrontFace) {
+    if (direction === "forward") {
+      rightPage.setFrontVisible(false);
+    } else {
+      leftPage.setFrontVisible(false);
+    }
+  }
   applyUnderFromCache(direction);
   updateUnderVisibility(direction);
   void loadTurningBackTexture(direction);
@@ -426,6 +489,58 @@ let perfLastTime = 0;
 let perfLastUpdate = 0;
 let perfFps = 0;
 
+function getTexturePage(texture: THREE.Texture | null | undefined) {
+  return (texture?.userData as { pageNumber?: number } | undefined)?.pageNumber ?? null;
+}
+
+function getMeshFaceTexturePage(mesh: THREE.Mesh, faceIndex: number) {
+  const mats = mesh.material as THREE.Material[];
+  const mat = mats?.[faceIndex] as THREE.MeshPhongMaterial | undefined;
+  return getTexturePage(mat?.map ?? null);
+}
+
+function logTurnDebug(direction: "forward" | "backward") {
+  const turning = direction === "forward" ? rightPage : leftPage;
+  const turningMaterial = turning.mesh.material as THREE.Material[];
+  const frontMat = turningMaterial?.[5] as THREE.MeshPhongMaterial | undefined;
+  const backMat = turningMaterial?.[4] as THREE.MeshPhongMaterial | undefined;
+  const frontTex = frontMat?.map ?? null;
+  const backTex = backMat?.map ?? null;
+
+  const layout = (turning.mesh.geometry as THREE.BufferGeometry).userData?.layout as
+    | { E: number; frontTop: number; backTop: number }
+    | undefined;
+  const uvAttr = (turning.mesh.geometry as THREE.BufferGeometry).getAttribute("uv") as
+    | THREE.BufferAttribute
+    | undefined;
+  const samples: Array<{ r: number; uFront: number | null; uBack: number | null }> = [];
+  if (layout && uvAttr) {
+    const last = Math.max(0, layout.E - 1);
+    const mid = Math.floor(last / 2);
+    const indices = [0, mid, last];
+    for (const r of indices) {
+      const uFront = uvAttr.getX(layout.frontTop + r);
+      const uBack = uvAttr.getX(layout.backTop + r);
+      samples.push({ r, uFront, uBack });
+    }
+  }
+
+  console.log("flipbook: turn debug", {
+    direction,
+    layoutMode: resolveLayout(),
+    currentSpreadLeft,
+    turningSide: direction === "forward" ? "right" : "left",
+    turningFrontPage: getTexturePage(frontTex),
+    turningBackPage: getTexturePage(backTex),
+    underLeftPage: getUnderPages(direction).underLeft,
+    underRightPage: getUnderPages(direction).underRight,
+    underLeftTexture: getMeshFaceTexturePage(underLeftPage.mesh, 5),
+    underRightTexture: getMeshFaceTexturePage(underRightPage.mesh, 5),
+    uvSamples: samples,
+    note: "uvSamples r=0 outer, r=mid mid, r=last spine"
+  });
+}
+
 function animate(time: number = 0) {
   // Update controller (handles physics animation internally)
   flipbookController.update(time / 1000);
@@ -466,11 +581,17 @@ const renderButton = document.getElementById("renderButton") as HTMLButtonElemen
 const layoutSelect = document.getElementById("layoutSelect") as HTMLSelectElement | null;
 const qualitySelect = document.getElementById("qualitySelect") as HTMLSelectElement | null;
 const dragFeelSelect = document.getElementById("dragFeelSelect") as HTMLSelectElement | null;
+const hideTurningFrontToggle = document.getElementById("hideTurningFrontToggle") as HTMLInputElement | null;
+const hideUnderPagesToggle = document.getElementById("hideUnderPagesToggle") as HTMLInputElement | null;
 
 let sessionId = "";
 let token = "";
 let documentId = "";
 let lastPageSize: { width: number; height: number } | null = null;
+let hideTurningFrontFace = false;
+let lastTurnDirection: "forward" | "backward" | null = null;
+let hideUnderPagesDuringDrag = false;
+const turningFrontBiasDelta = 2.0;
 const urlTextureCache = new TextureCache(10);
 const pageRenderCache = new TextureCache(16);
 const pageRenderPromises = new Map<string, Promise<CachedTexture | null>>();
@@ -559,10 +680,10 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
 
     updateStackDepth(pageW, pageD, bookThickness, mode);
 
-    rightPage.group.visible = true;
-    leftPage.group.visible = true;
-    underLeftPage.group.visible = true;
-    underRightPage.group.visible = true;
+    rightPage.mesh.visible = true;
+    leftPage.mesh.visible = true;
+    underLeftPage.mesh.visible = true;
+    underRightPage.mesh.visible = true;
   } else {
     // Single page mode - show as right page (like first page of book)
     leftPage.setSize(pageW, pageD);
@@ -570,11 +691,11 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     // Position so page is centered (spine edge at X=0, page extends to +X)
     leftPage.group.position.set(0, pageY, 0);
 
-    underLeftPage.group.visible = false;
-    underRightPage.group.visible = false;
+    underLeftPage.mesh.visible = false;
+    underRightPage.mesh.visible = false;
     leftStack.visible = !minimalRender;
-    rightPage.group.visible = false;
-    leftPage.group.visible = true;
+    rightPage.mesh.visible = false;
+    leftPage.mesh.visible = true;
     spine.visible = false;
     shadowEdge.visible = false;
     rightStack.visible = false;
@@ -796,6 +917,26 @@ dragFeelSelect?.addEventListener("change", () => {
   const feel = (dragFeelSelect.value as "snappy" | "soft") ?? "snappy";
   flipbookController.setDragFeel(feel);
 });
+hideTurningFrontToggle?.addEventListener("change", () => {
+  hideTurningFrontFace = !!hideTurningFrontToggle.checked;
+  if (!hideTurningFrontFace) {
+    leftPage.setFrontVisible(true);
+    rightPage.setFrontVisible(true);
+    return;
+  }
+  if (!lastTurnDirection) return;
+  if (lastTurnDirection === "forward") {
+    rightPage.setFrontVisible(false);
+  } else {
+    leftPage.setFrontVisible(false);
+  }
+});
+hideUnderPagesToggle?.addEventListener("change", () => {
+  hideUnderPagesDuringDrag = !!hideUnderPagesToggle.checked;
+  if (!hideUnderPagesDuringDrag) {
+    updateUnderVisibility(underDirection);
+  }
+});
 
 window.addEventListener("resize", () => {
   if (lastPageSize) {
@@ -891,6 +1032,11 @@ async function requestAndLoadPage(
       });
       loaded = await loadTexture(retry.url);
     }
+    loaded.texture.userData = {
+      ...(loaded.texture.userData ?? {}),
+      pageNumber,
+      cacheKey
+    };
     const cachedValue = {
       ...loaded,
       key: cacheKey,

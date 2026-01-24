@@ -9,6 +9,9 @@ export type PageMesh = {
   getAngle: () => number;
   setTexture: (texture: THREE.Texture | null) => void;
   setBackTexture: (texture: THREE.Texture | null) => void;
+  setFrontVisible: (visible: boolean) => void;
+  setFrontBiasDelta: (delta: number) => void;
+  setFrontDepthWrite: (enabled: boolean) => void;
   setSize: (width: number, height: number) => void;
   beginAnimation: () => void;
   endAnimation: () => void;
@@ -54,8 +57,8 @@ export function createPageMesh(): PageMesh {
   let curveAngleDeg = 0;
   let flexibility = 0.9;
 
-  let frontTexture: THREE.Texture | null = null;
-  let backTexture: THREE.Texture | null = null;
+  let baseBias = 0;
+  let frontBiasDelta = 0;
 
   /**
    * Create segmented box geometry for a page lying flat on XZ plane.
@@ -97,7 +100,6 @@ export function createPageMesh(): PageMesh {
   };
 
   const setTexture = (texture: THREE.Texture | null) => {
-    frontTexture = texture;
     // Set texture on all materials EXCEPT material 4 (back face)
     // Material 4 is controlled separately by setBackTexture()
     for (let i = 0; i < faceMaterials.length; i++) {
@@ -109,26 +111,51 @@ export function createPageMesh(): PageMesh {
   };
 
   const setDepthBias = (bias: number) => {
-    for (const mat of faceMaterials) {
-      const m = mat as THREE.MeshPhongMaterial;
-      if (bias !== 0) {
-        m.polygonOffset = true;
-        m.polygonOffsetFactor = bias;
-        m.polygonOffsetUnits = bias;
+    baseBias = bias;
+    const front = faceMaterials[5] as THREE.MeshPhongMaterial;
+    const back = faceMaterials[4] as THREE.MeshPhongMaterial;
+    const delta = 0.6;
+
+    const apply = (mat: THREE.MeshPhongMaterial, value: number) => {
+      if (value !== 0) {
+        mat.polygonOffset = true;
+        mat.polygonOffsetFactor = value;
+        mat.polygonOffsetUnits = value;
       } else {
-        m.polygonOffset = false;
-        m.polygonOffsetFactor = 0;
-        m.polygonOffsetUnits = 0;
+        mat.polygonOffset = false;
+        mat.polygonOffsetFactor = 0;
+        mat.polygonOffsetUnits = 0;
       }
-      m.needsUpdate = true;
-    }
+      mat.needsUpdate = true;
+    };
+
+    // Separate front/back slightly to avoid z-fighting in the curl.
+    // Keep back closer than front so the reverse side wins during curl.
+    apply(front, bias + delta + frontBiasDelta);
+    apply(back, bias - delta);
   };
 
   const setBackTexture = (texture: THREE.Texture | null) => {
-    backTexture = texture;
     const back = faceMaterials[4] as THREE.MeshPhongMaterial;
     back.map = texture;
     back.needsUpdate = true;
+  };
+
+  const setFrontVisible = (visible: boolean) => {
+    const front = faceMaterials[5] as THREE.MeshPhongMaterial;
+    front.visible = visible;
+    front.needsUpdate = true;
+  };
+
+  const setFrontBiasDelta = (delta: number) => {
+    frontBiasDelta = delta;
+    setDepthBias(baseBias);
+  };
+
+  const setFrontDepthWrite = (enabled: boolean) => {
+    const front = faceMaterials[5] as THREE.MeshPhongMaterial;
+    front.depthWrite = enabled;
+    front.needsUpdate = true;
   };
 
   const setSize = (width: number, height: number) => {
@@ -190,6 +217,9 @@ export function createPageMesh(): PageMesh {
     getAngle,
     setTexture,
     setBackTexture,
+    setFrontVisible,
+    setFrontBiasDelta,
+    setFrontDepthWrite,
     setSize,
     beginAnimation,
     endAnimation,
@@ -302,8 +332,8 @@ function createFaceMaterials(): THREE.Material[] {
     materials.push(new THREE.MeshPhongMaterial({ ...base }));
   }
   materials[4].color = new THREE.Color(0xf2efe7);
-  materials[4].side = THREE.DoubleSide;
   materials[5].color = new THREE.Color(0xffffff);
+  materials[4].side = THREE.DoubleSide;
   materials[5].side = THREE.DoubleSide;
   return materials;
 }
