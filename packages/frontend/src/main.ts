@@ -1251,9 +1251,29 @@ function updateUnderVisibility(direction: "forward" | "backward") {
 async function loadTurningBackTexture(direction: "forward" | "backward") {
   if (!documentId || !token) return;
   const layoutMode = resolveLayout();
-  if (layoutMode !== "double") return;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
   const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
+
+  if (layoutMode === "single") {
+    // In single page mode, back shows next/prev page
+    const targetPage = direction === "forward"
+      ? currentPageNumber + 1
+      : currentPageNumber - 1;
+    if (targetPage < 1 || targetPage > totalDocumentPages) {
+      leftPage.setBackTexture(null);
+      return;
+    }
+    const render = await requestAndLoadPage(targetPage, layoutMode, scale, () => true, {
+      allowInactiveCache: true,
+      target
+    });
+    if (render) {
+      leftPage.setBackTexture(render.texture);
+    }
+    return;
+  }
+
+  // Double page mode
   const targetPage = getTurningBackPage(direction);
   if (targetPage < 1 || targetPage > totalDocumentPages) return;
   const render = await requestAndLoadPage(targetPage, layoutMode, scale, () => true, {
@@ -1298,9 +1318,18 @@ function areUnderPagesReady(direction: "forward" | "backward") {
 function isTurningBackReady(direction: "forward" | "backward") {
   if (!documentId || !token) return false;
   const layoutMode = resolveLayout();
-  if (layoutMode !== "double") return true;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
   const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
+
+  if (layoutMode === "single") {
+    const targetPage = direction === "forward"
+      ? currentPageNumber + 1
+      : currentPageNumber - 1;
+    if (targetPage < 1 || targetPage > totalDocumentPages) return true;
+    return !!getCachedPageRender(targetPage, layoutMode, scale, target);
+  }
+
+  // Double page mode
   const targetPage = getTurningBackPage(direction);
   if (targetPage < 1 || targetPage > totalDocumentPages) return true;
   return !!getCachedPageRender(targetPage, layoutMode, scale, target);
