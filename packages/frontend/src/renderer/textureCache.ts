@@ -42,6 +42,10 @@ export class TextureCache {
     return Array.from(this.items.keys());
   }
 
+  size() {
+    return this.items.size;
+  }
+
   clear() {
     for (const item of this.items.values()) {
       item.texture.dispose();

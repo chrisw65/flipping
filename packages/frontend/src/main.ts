@@ -236,13 +236,32 @@ window.addEventListener("resize", resize);
 resize();
 
 // Initialize the flipbook controller for interactions
-const debugHit = new URLSearchParams(window.location.search).has("debugHit");
+const searchParams = new URLSearchParams(window.location.search);
+const debugHit = searchParams.has("debugHit");
+const perfEnabled = searchParams.has("perf");
 const debugOverlay = debugHit
   ? createInteractionDebugOverlay(renderer.domElement, {
       cornerHitAreaFraction: 0.18,
       edgeHitAreaFraction: 0.12,
     })
   : null;
+
+const perfOverlay = perfEnabled ? document.createElement("div") : null;
+if (perfOverlay) {
+  perfOverlay.style.position = "fixed";
+  perfOverlay.style.right = "16px";
+  perfOverlay.style.bottom = "16px";
+  perfOverlay.style.padding = "6px 8px";
+  perfOverlay.style.borderRadius = "8px";
+  perfOverlay.style.background = "rgba(10, 14, 18, 0.85)";
+  perfOverlay.style.border = "1px solid rgba(255, 255, 255, 0.08)";
+  perfOverlay.style.color = "#cbd5e1";
+  perfOverlay.style.fontSize = "11px";
+  perfOverlay.style.fontFamily = "ui-monospace, Menlo, SFMono-Regular, monospace";
+  perfOverlay.style.zIndex = "9999";
+  perfOverlay.textContent = "fps: --";
+  document.body.appendChild(perfOverlay);
+}
 
 const dragFeelSelectEarly = document.getElementById("dragFeelSelect") as HTMLSelectElement | null;
 
@@ -315,63 +334,97 @@ async function loadCurrentSpread() {
   activeSpreadId = requestId;
   const isActive = () => requestId === activeSpreadId;
 
-  try {
-    let referenceRender: { width: number; height: number } | null = null;
-    const [leftRender, rightRender] = await Promise.all([
-      leftPageNumber ? requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive) : null,
+  const loadAtTarget = async (target: { qualityScale: number; maxWidthScale: number }) => {
+    return Promise.all([
+      leftPageNumber
+        ? requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive, { target })
+        : null,
       layoutMode === "double" && rightPageNumber && rightPageNumber <= totalDocumentPages
-        ? requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive)
+        ? requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive, { target })
         : null
     ]);
+  };
+  const loadRightBack = async (pageNumber: number | null) => {
+    if (!pageNumber || layoutMode !== "double") return;
+    const backPageNumber = pageNumber + 1;
+    if (backPageNumber > totalDocumentPages) {
+      rightPage.setBackTexture(null);
+      return;
+    }
+    const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
+    const render = await requestAndLoadPage(backPageNumber, layoutMode, scale, isActive, {
+      allowInactiveCache: true,
+      target
+    });
+    if (!isActive() || !render) return;
+    rightPage.setBackTexture(render.texture);
+  };
+
+  try {
+    let referenceRender: { width: number; height: number } | null = null;
+    // Fast low-res pass for immediate response.
+    const [leftRender, rightRender] = await loadAtTarget({
+      qualityScale: underQualityScale,
+      maxWidthScale: underQualityScale
+    });
     if (!isActive()) return;
     if (leftRender) {
       leftPage.setTexture(leftRender.texture);
+      referenceRender = { width: leftRender.width, height: leftRender.height };
       if (rightRender) {
         leftPage.setBackTexture(rightRender.texture);
       }
-      referenceRender = { width: leftRender.width, height: leftRender.height };
     } else {
       leftPage.setTexture(null);
-      leftPage.setBackTexture(null);
     }
 
     if (rightRender) {
       rightPage.setTexture(rightRender.texture);
-      if (leftRender) {
-        rightPage.setBackTexture(leftRender.texture);
-      }
       if (!referenceRender) {
         referenceRender = { width: rightRender.width, height: rightRender.height };
       }
     } else {
       rightPage.setTexture(null);
-      rightPage.setBackTexture(null);
     }
+    void loadRightBack(rightPageNumber);
 
     if (referenceRender) {
       updateLayout(referenceRender.width, referenceRender.height, layoutMode);
     }
     await loadUnderSpread(underDirection);
+    void loadTurningBackTexture("forward");
+    void loadTurningBackTexture("backward");
     void preloadDirection("forward");
     void preloadDirection("backward");
-    const infoSource = leftRender ?? rightRender;
-    if (infoSource) {
-      const reqW = infoSource.requestedWidth ?? 0;
-      const reqH = infoSource.requestedHeight ?? 0;
-      setRenderInfo(
-        reqW && reqH
-          ? `Requested ${reqW}×${reqH}, got ${infoSource.width}×${infoSource.height}`
-          : `Texture ${infoSource.width}×${infoSource.height}`
-      );
-    } else {
-      setRenderInfo("");
-    }
     void prefetchAdjacentPages();
     enforcePageCacheWindow();
+
+    // High-res pass swaps in when ready.
+    void (async () => {
+      const [leftHi, rightHi] = await loadAtTarget({
+        qualityScale: activeQualityBoost,
+        maxWidthScale: activeQualityBoost
+      });
+      if (!isActive()) return;
+      if (leftHi) {
+        leftPage.setTexture(leftHi.texture);
+      }
+      if (rightHi) {
+        rightPage.setTexture(rightHi.texture);
+      }
+      if (leftHi && rightHi) {
+        leftPage.setBackTexture(rightHi.texture);
+      }
+    })();
   } catch (error) {
     console.error("Failed to load spread:", error);
   }
 }
+
+let perfFrames = 0;
+let perfLastTime = 0;
+let perfLastUpdate = 0;
+let perfFps = 0;
 
 function animate(time: number = 0) {
   // Update controller (handles physics animation internally)
@@ -383,13 +436,29 @@ function animate(time: number = 0) {
   }
 
   renderer.render(scene, camera);
+  if (perfOverlay) {
+    perfFrames += 1;
+    if (perfLastTime === 0) {
+      perfLastTime = time;
+      perfLastUpdate = time;
+    }
+    const elapsed = time - perfLastTime;
+    if (elapsed >= 500) {
+      perfFps = (perfFrames * 1000) / elapsed;
+      perfFrames = 0;
+      perfLastTime = time;
+    }
+    if (time - perfLastUpdate >= 500) {
+      perfLastUpdate = time;
+      perfOverlay.textContent = `fps: ${perfFps.toFixed(1)} | cache: ${pageRenderCache.size()}`;
+    }
+  }
   requestAnimationFrame(animate);
 }
 
 animate();
 
 const status = document.getElementById("status");
-const renderInfo = document.getElementById("renderInfo");
 const fileInput = document.getElementById("fileInput") as HTMLInputElement | null;
 const pageInput = document.getElementById("pageInput") as HTMLInputElement | null;
 const scaleInput = document.getElementById("scaleInput") as HTMLInputElement | null;
@@ -397,7 +466,6 @@ const renderButton = document.getElementById("renderButton") as HTMLButtonElemen
 const layoutSelect = document.getElementById("layoutSelect") as HTMLSelectElement | null;
 const qualitySelect = document.getElementById("qualitySelect") as HTMLSelectElement | null;
 const dragFeelSelect = document.getElementById("dragFeelSelect") as HTMLSelectElement | null;
-const debugPreview = document.getElementById("debugPreview") as HTMLImageElement | null;
 
 let sessionId = "";
 let token = "";
@@ -408,6 +476,8 @@ const pageRenderCache = new TextureCache(16);
 const pageRenderPromises = new Map<string, Promise<CachedTexture | null>>();
 const disableTextureCache = true;
 const pageCacheWindow = 3;
+const activeQualityBoost = 1.2;
+const underQualityScale = 0.9;
 
 type LayoutMode = "auto" | "single" | "double";
 type PageSizePreset = "auto" | "a4" | "6x9" | "8.5x8.5";
@@ -529,11 +599,6 @@ function setStatus(message: string) {
   }
 }
 
-function setRenderInfo(message: string) {
-  if (renderInfo) {
-    renderInfo.textContent = message;
-  }
-}
 
 async function ensureSession() {
   if (token) return;
@@ -604,17 +669,20 @@ async function handleRender() {
     let rightRender: Awaited<ReturnType<typeof requestAndLoadPage>> | null = null;
 
     if (leftPageNumber) {
-      leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive);
+      leftRender = await requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive, {
+        target: { qualityScale: underQualityScale, maxWidthScale: underQualityScale }
+      });
       if (!isActive() || !leftRender) return;
       leftPage.setTexture(leftRender.texture);
       referenceRender = { width: leftRender.width, height: leftRender.height };
     } else {
       leftPage.setTexture(null);
-      leftPage.setBackTexture(null);
     }
 
     if (layoutMode === "double" && rightPageNumber) {
-      rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive);
+      rightRender = await requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive, {
+        target: { qualityScale: underQualityScale, maxWidthScale: underQualityScale }
+      });
       if (!isActive() || !rightRender) return;
       rightPage.setTexture(rightRender.texture);
       if (!referenceRender) {
@@ -622,12 +690,24 @@ async function handleRender() {
       }
     } else {
       rightPage.setTexture(null);
-      rightPage.setBackTexture(null);
     }
 
     if (leftRender && rightRender) {
       leftPage.setBackTexture(rightRender.texture);
-      rightPage.setBackTexture(leftRender.texture);
+    }
+    if (layoutMode === "double" && rightPageNumber) {
+      const backPageNumber = rightPageNumber + 1;
+      if (backPageNumber > totalDocumentPages) {
+        rightPage.setBackTexture(null);
+      } else {
+        const backRender = await requestAndLoadPage(backPageNumber, layoutMode, scale, isActive, {
+          allowInactiveCache: true,
+          target: { qualityScale: underQualityScale, maxWidthScale: underQualityScale }
+        });
+        if (isActive() && backRender) {
+          rightPage.setBackTexture(backRender.texture);
+        }
+      }
     }
 
     if (referenceRender) {
@@ -641,23 +721,37 @@ async function handleRender() {
     flipbookController.setCurrentPage(pageNumber - 1);
 
     setStatus(`Rendered page ${pageNumber}${layoutMode === "double" ? " (spread)" : ""} - Use arrow keys or drag corners to turn pages`);
-    const infoSource = leftRender ?? rightRender;
-    if (infoSource) {
-      const reqW = infoSource.requestedWidth ?? 0;
-      const reqH = infoSource.requestedHeight ?? 0;
-      setRenderInfo(
-        reqW && reqH
-          ? `Requested ${reqW}×${reqH}, got ${infoSource.width}×${infoSource.height}`
-          : `Texture ${infoSource.width}×${infoSource.height}`
-      );
-    } else {
-      setRenderInfo("");
-    }
     await loadUnderSpread(underDirection);
+    void loadTurningBackTexture("forward");
+    void loadTurningBackTexture("backward");
     void preloadDirection("forward");
     void preloadDirection("backward");
     void prefetchAdjacentPages();
     enforcePageCacheWindow();
+
+    // High-res swap for active spread.
+    void (async () => {
+      if (!isActive()) return;
+      const highTarget = { qualityScale: activeQualityBoost, maxWidthScale: activeQualityBoost };
+      const [leftHi, rightHi] = await Promise.all([
+        leftPageNumber
+          ? requestAndLoadPage(leftPageNumber, layoutMode, scale, isActive, {
+              target: highTarget
+            })
+          : null,
+        layoutMode === "double" && rightPageNumber && rightPageNumber <= totalDocumentPages
+          ? requestAndLoadPage(rightPageNumber, layoutMode, scale, isActive, {
+              target: highTarget
+            })
+          : null
+      ]);
+      if (!isActive()) return;
+      if (leftHi) leftPage.setTexture(leftHi.texture);
+      if (rightHi) rightPage.setTexture(rightHi.texture);
+      if (leftHi && rightHi) {
+        leftPage.setBackTexture(rightHi.texture);
+      }
+    })();
   } catch (error) {
     console.error(error);
     setStatus(`Rasterize failed: ${(error as Error).message}`);
@@ -743,11 +837,6 @@ async function loadTexture(url: string) {
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.needsUpdate = true;
 
-  if (debugPreview) {
-    debugPreview.src = objectUrl;
-    debugPreview.style.display = "block";
-  }
-
   // Revoke object URL after texture is uploaded to GPU (next frame)
   requestAnimationFrame(() => {
     URL.revokeObjectURL(objectUrl);
@@ -765,10 +854,13 @@ async function requestAndLoadPage(
   mode: LayoutMode,
   scale: number,
   isActive: () => boolean,
-  options?: { allowInactiveCache?: boolean }
+  options?: {
+    allowInactiveCache?: boolean;
+    target?: { qualityScale?: number; maxWidthScale?: number };
+  }
 ) {
-  const desired = getTargetDimensions(mode);
-  const cacheKey = buildPageCacheKey(pageNumber, mode, scale);
+  const desired = getTargetDimensions(mode, options?.target);
+  const cacheKey = buildPageCacheKey(pageNumber, mode, scale, options?.target);
 
   const cached = pageRenderCache.get(cacheKey);
   if (cached) return cached;
@@ -929,14 +1021,24 @@ function resolveSpread(
   return { left: spreadLeft, right, spreadLeft };
 }
 
-function buildPageCacheKey(pageNumber: number, mode: LayoutMode, scale: number) {
-  const desired = getTargetDimensions(mode);
+function buildPageCacheKey(
+  pageNumber: number,
+  mode: LayoutMode,
+  scale: number,
+  target?: { qualityScale?: number; maxWidthScale?: number }
+) {
+  const desired = getTargetDimensions(mode, target);
   return `${documentId}|${mode}|${pageNumber}|${scale}|${desired.targetWidth ?? "auto"}x${desired.targetHeight ?? "auto"}`;
 }
 
-function getCachedPageRender(pageNumber: number, mode: LayoutMode, scale: number) {
+function getCachedPageRender(
+  pageNumber: number,
+  mode: LayoutMode,
+  scale: number,
+  target?: { qualityScale?: number; maxWidthScale?: number }
+) {
   if (!documentId) return null;
-  const key = buildPageCacheKey(pageNumber, mode, scale);
+  const key = buildPageCacheKey(pageNumber, mode, scale, target);
   return pageRenderCache.get(key) ?? null;
 }
 
@@ -945,6 +1047,7 @@ function applyUnderFromCache(direction: "forward" | "backward") {
   const layoutMode = resolveLayout();
   if (layoutMode !== "double") return;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   let underLeft: number | null = null;
   let underRight: number | null = null;
   if (direction === "forward") {
@@ -958,11 +1061,11 @@ function applyUnderFromCache(direction: "forward" | "backward") {
   updateUnderVisibility(direction);
   const leftCached =
     underLeft && underLeft >= 1 && underLeft <= totalDocumentPages
-      ? getCachedPageRender(underLeft, layoutMode, scale)
+      ? getCachedPageRender(underLeft, layoutMode, scale, target)
       : null;
   const rightCached =
     underRight && underRight >= 1 && underRight <= totalDocumentPages
-      ? getCachedPageRender(underRight, layoutMode, scale)
+      ? getCachedPageRender(underRight, layoutMode, scale, target)
       : null;
 
   if (leftCached) {
@@ -974,12 +1077,6 @@ function applyUnderFromCache(direction: "forward" | "backward") {
   if (leftCached && rightCached) {
     underLeftPage.setBackTexture(rightCached.texture);
     underRightPage.setBackTexture(leftCached.texture);
-  }
-
-  if (direction === "forward" && leftCached) {
-    rightPage.setBackTexture(leftCached.texture);
-  } else if (direction === "backward" && rightCached) {
-    leftPage.setBackTexture(rightCached.texture);
   }
 }
 
@@ -1010,17 +1107,14 @@ async function loadTurningBackTexture(direction: "forward" | "backward") {
   const layoutMode = resolveLayout();
   if (layoutMode !== "double") return;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   const targetPage = getTurningBackPage(direction);
   if (targetPage < 1 || targetPage > totalDocumentPages) return;
   const render = await requestAndLoadPage(targetPage, layoutMode, scale, () => true, {
     allowInactiveCache: true,
+    target
   });
   if (!render) return;
-  if (direction === "forward") {
-    rightPage.setBackTexture(render.texture);
-  } else {
-    leftPage.setBackTexture(render.texture);
-  }
 }
 
 function getTurningBackPage(direction: "forward" | "backward") {
@@ -1032,6 +1126,7 @@ function areUnderPagesReady(direction: "forward" | "backward") {
   const layoutMode = resolveLayout();
   if (layoutMode !== "double") return true;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   let underLeft: number | null = null;
   let underRight: number | null = null;
   if (direction === "forward") {
@@ -1045,12 +1140,12 @@ function areUnderPagesReady(direction: "forward" | "backward") {
     !underLeft ||
     underLeft < 1 ||
     underLeft > totalDocumentPages ||
-    !!getCachedPageRender(underLeft, layoutMode, scale);
+    !!getCachedPageRender(underLeft, layoutMode, scale, target);
   const rightReady =
     !underRight ||
     underRight < 1 ||
     underRight > totalDocumentPages ||
-    !!getCachedPageRender(underRight, layoutMode, scale);
+    !!getCachedPageRender(underRight, layoutMode, scale, target);
   return leftReady && rightReady;
 }
 
@@ -1059,15 +1154,17 @@ function isTurningBackReady(direction: "forward" | "backward") {
   const layoutMode = resolveLayout();
   if (layoutMode !== "double") return true;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   const targetPage = getTurningBackPage(direction);
   if (targetPage < 1 || targetPage > totalDocumentPages) return true;
-  return !!getCachedPageRender(targetPage, layoutMode, scale);
+  return !!getCachedPageRender(targetPage, layoutMode, scale, target);
 }
 
 async function prefetchAdjacentPages() {
   if (!documentId || !token) return;
   const layoutMode = resolveLayout();
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   const pages: number[] = [];
   if (layoutMode === "double") {
     pages.push(
@@ -1087,6 +1184,7 @@ async function prefetchAdjacentPages() {
     unique.map((page) =>
       requestAndLoadPage(page, layoutMode, scale, () => true, {
         allowInactiveCache: true,
+        target
       })
     )
   );
@@ -1128,6 +1226,7 @@ async function loadUnderSpread(direction: "forward" | "backward") {
   activeUnderId = requestId;
   const isActive = () => requestId === activeUnderId;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   let underLeft: number | null = null;
   let underRight: number | null = null;
   if (direction === "forward") {
@@ -1141,10 +1240,10 @@ async function loadUnderSpread(direction: "forward" | "backward") {
   const [leftRender, rightRender] = await Promise.all([
     !underLeft || underLeft < 1 || underLeft > totalDocumentPages
       ? Promise.resolve(null)
-      : requestAndLoadPage(underLeft, layoutMode, scale, isActive),
+      : requestAndLoadPage(underLeft, layoutMode, scale, isActive, { target }),
     !underRight || underRight < 1 || underRight > totalDocumentPages
       ? Promise.resolve(null)
-      : requestAndLoadPage(underRight, layoutMode, scale, isActive),
+      : requestAndLoadPage(underRight, layoutMode, scale, isActive, { target }),
   ]);
   if (!isActive()) return;
 
@@ -1169,13 +1268,6 @@ async function loadUnderSpread(direction: "forward" | "backward") {
     underLeftPage.setBackTexture(null);
     underRightPage.setBackTexture(null);
   }
-
-  // Ensure the turning page reveals the next/prev page on its back face.
-  if (direction === "forward" && leftRender) {
-    rightPage.setBackTexture(leftRender.texture);
-  } else if (direction === "backward" && rightRender) {
-    leftPage.setBackTexture(rightRender.texture);
-  }
 }
 
 async function preloadDirection(direction: "forward" | "backward") {
@@ -1183,6 +1275,7 @@ async function preloadDirection(direction: "forward" | "backward") {
   const layoutMode = resolveLayout();
   if (layoutMode !== "double") return;
   const scale = Number.parseFloat(scaleInput?.value ?? "1");
+  const target = { qualityScale: underQualityScale, maxWidthScale: underQualityScale };
   let underLeft: number | null = null;
   let underRight: number | null = null;
   if (direction === "forward") {
@@ -1197,11 +1290,13 @@ async function preloadDirection(direction: "forward" | "backward") {
       ? Promise.resolve(null)
       : requestAndLoadPage(underLeft, layoutMode, scale, () => true, {
           allowInactiveCache: true,
+          target
         }),
     !underRight || underRight < 1 || underRight > totalDocumentPages
       ? Promise.resolve(null)
       : requestAndLoadPage(underRight, layoutMode, scale, () => true, {
           allowInactiveCache: true,
+          target
         }),
   ]);
 
@@ -1210,11 +1305,6 @@ async function preloadDirection(direction: "forward" | "backward") {
   if (leftRender && rightRender) {
     underLeftPage.setBackTexture(rightRender.texture);
     underRightPage.setBackTexture(leftRender.texture);
-  }
-  if (direction === "forward" && leftRender) {
-    rightPage.setBackTexture(leftRender.texture);
-  } else if (direction === "backward" && rightRender) {
-    leftPage.setBackTexture(rightRender.texture);
   }
 }
 
@@ -1273,15 +1363,20 @@ function updateFoldShadows() {
   (foldOuterShadow.material as THREE.MeshBasicMaterial).opacity = outerOpacity;
 }
 
-function getTargetDimensions(mode: LayoutMode) {
+function getTargetDimensions(
+  mode: LayoutMode,
+  options?: { qualityScale?: number; maxWidthScale?: number }
+) {
   if (!lastPageSize) return {};
   const canvasWidth = renderer.domElement.clientWidth;
   const canvasHeight = renderer.domElement.clientHeight;
   const dpr = Math.min(window.devicePixelRatio, 3);
   const widthForPage = mode === "double" ? canvasWidth * 0.5 : canvasWidth;
   const quality = getQualityPreset();
-  const multiplier = quality === "high" ? 2.2 : quality === "low" ? 1.2 : 1.6;
-  const maxWidth = quality === "high" ? 5200 : quality === "low" ? 3000 : 4200;
+  const baseMultiplier = quality === "high" ? 2.2 : quality === "low" ? 1.2 : 1.6;
+  const baseMaxWidth = quality === "high" ? 5200 : quality === "low" ? 3000 : 4200;
+  const multiplier = baseMultiplier * (options?.qualityScale ?? 1);
+  const maxWidth = baseMaxWidth * (options?.maxWidthScale ?? 1);
   const baseWidth = widthForPage * dpr * multiplier;
   const targetWidth = Math.min(Math.round(baseWidth), maxWidth);
   const aspect = getPageAspect() ?? lastPageSize.width / lastPageSize.height;
