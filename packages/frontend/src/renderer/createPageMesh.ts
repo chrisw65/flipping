@@ -178,6 +178,13 @@ export function createPageMesh(): PageMesh {
     setSize(currentWidth, currentHeight);
     // Reset rotation
     setProgress(0);
+
+    // When X coordinates are flipped for left pages, the triangle winding
+    // reverses, which inverts the computed normals. Use BackSide for left
+    // pages so the faces render correctly.
+    const materialSide = side === "left" ? THREE.BackSide : THREE.FrontSide;
+    (faceMaterials[4] as THREE.MeshPhongMaterial).side = materialSide;
+    (faceMaterials[5] as THREE.MeshPhongMaterial).side = materialSide;
   };
 
   const getSide = () => pageSide;
