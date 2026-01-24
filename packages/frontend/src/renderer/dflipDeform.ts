@@ -113,14 +113,6 @@ export function updateSheetGeometry(
     arc.push(arcLength);
   }
 
-  // Calculate separate arc lengths for back curve (different shape due to paper thickness)
-  let backArcLength = 0;
-  const backArc = [0];
-  for (let i = 1; i < backPts.length; i++) {
-    backArcLength += backPts[i].distanceTo(backPts[i - 1]);
-    backArc.push(backArcLength);
-  }
-
   const pos = geometry.getAttribute("position") as THREE.BufferAttribute | null;
   const uv = geometry.getAttribute("uv") as THREE.BufferAttribute | null;
   const layout = geometry.userData?.layout as
@@ -146,13 +138,12 @@ export function updateSheetGeometry(
       setVertex(pos, layout.backTop + r, bx, yBack + back.z, halfHeight);
       setVertex(pos, layout.backBottom + r, bx, yBack + back.z, -halfHeight);
 
-      // UV mapping: front face is side-dependent, back face uses consistent mapping
+      // UV mapping: use same arc-length UV for both front and back faces
+      // This keeps front and back synchronized as the page curls
       // Front: right pages have U=0 at spine, left pages have U=0 at outer edge
-      // Back: always U=0 at outer edge so revealed back shows text correctly
-      // Use separate arc length calculation for back face (different curve shape)
+      // Back: same direction as front (U=0 at outer edge) for correct texture display
       const uFront = params.pageSide > 0 ? 1 - uArc : uArc;
-      const uBackArc = backArcLength > 0 ? backArc[r] / backArcLength : r / Math.max(1, E - 1);
-      const uBack = uBackArc;
+      const uBack = uArc;  // Use front curve's arc length for consistency
       setUv(uv, layout.frontTop + r, uFront, 0);
       setUv(uv, layout.frontBottom + r, uFront, 1);
       setUv(uv, layout.backTop + r, uBack, 0);
