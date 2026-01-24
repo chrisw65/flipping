@@ -93,6 +93,7 @@ export async function preprocessDocument(
 
   // Get page count
   const pageCount = await getDocumentPageCount(documentPath);
+  console.log(`[Preprocessor] Document ${documentId} has ${pageCount} pages`);
   updateDocumentPreprocessing(documentId, { pageCount });
 
   const pages: PageMetadata[] = [];
@@ -144,6 +145,7 @@ export async function preprocessDocument(
 
       completedSteps++;
       const progress = Math.round((completedSteps / totalSteps) * 100);
+      console.log(`[Preprocessor] ${documentId}: page ${page}/${pageCount} ${resolution} (${progress}%)`);
       onProgress?.(progress);
       updateDocumentPreprocessing(documentId, { preprocessingProgress: progress });
     }
@@ -179,12 +181,17 @@ export async function preprocessDocument(
  * Start preprocessing in background (non-blocking)
  */
 export function startPreprocessing(options: PreprocessingOptions): void {
-  preprocessDocument(options).catch((error) => {
-    console.error(`Preprocessing failed for ${options.documentId}:`, error);
-    updateDocumentPreprocessing(options.documentId, {
-      preprocessingError: error instanceof Error ? error.message : String(error),
+  console.log(`[Preprocessor] Starting preprocessing for document ${options.documentId}`);
+  preprocessDocument(options)
+    .then((result) => {
+      console.log(`[Preprocessor] Completed preprocessing for document ${options.documentId}: ${result.pageCount} pages`);
+    })
+    .catch((error) => {
+      console.error(`[Preprocessor] Failed for ${options.documentId}:`, error);
+      updateDocumentPreprocessing(options.documentId, {
+        preprocessingError: error instanceof Error ? error.message : String(error),
+      });
     });
-  });
 }
 
 /**

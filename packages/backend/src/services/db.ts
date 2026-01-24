@@ -1,4 +1,6 @@
 import Database from "better-sqlite3";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 
 export type SessionRecord = {
   sessionId: string;
@@ -20,9 +22,16 @@ export type DocumentRecord = {
 
 let db: Database.Database | null = null;
 
-export function initDb(path: string) {
+export function initDb(dbPath: string) {
   if (db) return db;
-  db = new Database(path);
+
+  // Ensure directory exists
+  const dir = dirname(dbPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
