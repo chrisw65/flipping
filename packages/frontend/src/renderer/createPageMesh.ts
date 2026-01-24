@@ -333,7 +333,7 @@ function createFaceMaterials(): THREE.Material[] {
   }
   materials[4].color = new THREE.Color(0xf2efe7);
   materials[5].color = new THREE.Color(0xffffff);
-  materials[4].side = THREE.DoubleSide;
-  materials[5].side = THREE.DoubleSide;
+  materials[4].side = THREE.FrontSide;
+  materials[5].side = THREE.FrontSide;
   return materials;
 }
