@@ -6,6 +6,7 @@ import Fastify from "fastify";
 import { config } from "./config.js";
 import { registerDocumentRoutes } from "./routes/documents.js";
 import { registerPageRoutes } from "./routes/page.js";
+import { registerPreprocessedRoutes } from "./routes/preprocessed.js";
 import { registerRasterizeRoutes } from "./routes/rasterize.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { initDb, purgeExpiredSessions } from "./services/db.js";
@@ -44,6 +45,7 @@ await registerSessionRoutes(app);
 await registerDocumentRoutes(app);
 await registerRasterizeRoutes(app);
 await registerPageRoutes(app);
+await registerPreprocessedRoutes(app);
 await registerMetricsRoutes(app);
 
 app.listen({ port: config.port, host: config.host }).catch((error) => {

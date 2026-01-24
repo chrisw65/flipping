@@ -9,6 +9,7 @@ export const config = {
   cacheKeySecret: process.env.CACHE_KEY_SECRET ?? "dev-cache-secret",
   maxConcurrentRasterize: Number.parseInt(process.env.MAX_CONCURRENT_RASTERIZE ?? "2", 10),
   documentStorageDir: process.env.DOCUMENT_STORAGE_DIR ?? "./.data/documents",
+  preprocessedDir: process.env.PREPROCESSED_DIR ?? "./.data/preprocessed",
   dbPath: process.env.DB_PATH ?? "./.data/flipbook.db",
   maxUploadBytes: Number.parseInt(process.env.MAX_UPLOAD_BYTES ?? "52428800", 10),
   cacheUrlTtlSeconds: Number.parseInt(process.env.CACHE_URL_TTL_SECONDS ?? "900", 10),

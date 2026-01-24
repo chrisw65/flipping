@@ -5,6 +5,7 @@ import path from "node:path";
 import { config } from "../config.js";
 import { getSession, insertDocument, listDocuments } from "../services/db.js";
 import { metrics } from "../services/metrics.js";
+import { startPreprocessing } from "../services/preprocessor.js";
 import { getDocumentPageCount } from "../services/rasterizer.js";
 
 export async function registerDocumentRoutes(app: FastifyInstance) {
@@ -80,6 +81,17 @@ export async function registerDocumentRoutes(app: FastifyInstance) {
 
     insertDocument(record);
     metrics.increment("uploads");
-    return reply.send(record);
+
+    // Start preprocessing in background (unless explicitly disabled)
+    const skipPreprocess = request.query && (request.query as Record<string, string>).preprocess === "false";
+    if (!skipPreprocess) {
+      startPreprocessing({
+        documentId: id,
+        documentPath: destPath,
+        outputDir: config.preprocessedDir,
+      });
+    }
+
+    return reply.send({ ...record, preprocessingStarted: !skipPreprocess });
   });
 }
