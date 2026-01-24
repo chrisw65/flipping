@@ -14,6 +14,8 @@ export type SheetDeformParams = {
   orientation: SheetOrientation;
   pageOffset: number;
   pageSide: number;
+  /** Skip expensive bounding/normal computations during animation */
+  fastUpdate?: boolean;
 };
 
 export type SheetDeformResult = {
@@ -149,9 +151,15 @@ export function updateSheetGeometry(
 
     pos.needsUpdate = true;
     uv.needsUpdate = true;
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
-    geometry.computeVertexNormals();
+
+    // Skip expensive computations during animation for better performance.
+    // Bounding box/sphere are only needed for frustum culling and raycasting.
+    // Vertex normals only affect lighting, not face culling.
+    if (!params.fastUpdate) {
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      geometry.computeVertexNormals();
+    }
   }
 
   const positionOffset = new THREE.Vector3();
