@@ -84,6 +84,7 @@ export function createPageMesh(): PageMesh {
       orientation: "horizontal",
       pageOffset: 0.05,
       pageSide: pageSide === "right" ? 1 : -1,
+      fastUpdate: isAnimating,
     });
 
     mesh.position.copy(result.positionOffset);
@@ -205,6 +206,8 @@ export function createPageMesh(): PageMesh {
     if (!isAnimating) return;
     isAnimating = false;
     mesh.renderOrder = 1;
+    // Recompute normals and bounding volumes now that animation is done
+    applyDeform();
   };
 
   const getMaterial = () => faceMaterials[5] as THREE.MeshPhongMaterial;
