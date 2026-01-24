@@ -77,6 +77,7 @@ export class FlipbookController {
   private dragStartU: number = 0;
   private dragStartTime: number = 0;
   private dragSide: "left" | "right" | null = null;
+  private dragPage: PageMesh | null = null;
   private hasExceededThreshold: boolean = false;
   private dragTargetProgress: number = 0;
   private dragCurrentProgress: number = 0;
@@ -190,14 +191,18 @@ export class FlipbookController {
         newState === FlipbookState.ANIMATING_FORWARD
       ) {
         this.turnDirection = "forward";
-        this.turningPage = this.rightPage;
+        // Use the actual page that was hit (for single page mode support)
+        // Fall back to visible page for keyboard navigation
+        this.turningPage = this.dragPage ?? this.getVisiblePageForTurn("forward");
         this.turningPage.beginAnimation();
       } else if (
         newState === FlipbookState.DRAGGING_BACKWARD ||
         newState === FlipbookState.ANIMATING_BACKWARD
       ) {
         this.turnDirection = "backward";
-        this.turningPage = this.leftPage;
+        // Use the actual page that was hit (for single page mode support)
+        // Fall back to visible page for keyboard navigation
+        this.turningPage = this.dragPage ?? this.getVisiblePageForTurn("backward");
         this.turningPage.beginAnimation();
       }
 
@@ -212,9 +217,28 @@ export class FlipbookController {
           this.turningPage = null;
         }
         this.turnDirection = null;
+        this.dragPage = null;
         this.setCursor("default");
       }
     });
+  }
+
+  /**
+   * Get the visible page to use for a turn direction.
+   * In single page mode, only one page is visible, so use it regardless of direction.
+   * In double page mode, use the standard right/left mapping.
+   */
+  private getVisiblePageForTurn(direction: "forward" | "backward"): PageMesh {
+    const rightVisible = this.rightPage.mesh.visible;
+    const leftVisible = this.leftPage.mesh.visible;
+
+    if (direction === "forward") {
+      // Prefer right page for forward, but use left if right is hidden
+      return rightVisible ? this.rightPage : this.leftPage;
+    } else {
+      // Prefer left page for backward, but use right if left is hidden
+      return leftVisible ? this.leftPage : this.rightPage;
+    }
   }
 
   private getPointerPosition(e: MouseEvent | Touch): { x: number; y: number } {
@@ -393,6 +417,7 @@ export class FlipbookController {
     this.dragStartU = uOuter;
     this.dragStartTime = performance.now();
     this.dragSide = side;
+    this.dragPage = hit.page;
     this.hasExceededThreshold = false;
     this.dragTargetProgress = 0;
     this.dragCurrentProgress = 0;

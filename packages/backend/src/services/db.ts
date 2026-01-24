@@ -13,6 +13,9 @@ export type DocumentRecord = {
   size: number;
   addedAt: number;
   pageCount?: number | null;
+  preprocessed?: boolean;
+  preprocessingProgress?: number;
+  preprocessingError?: string | null;
 };
 
 let db: Database.Database | null = null;
@@ -51,6 +54,21 @@ export function initDb(path: string) {
   } catch {
     // Column already exists.
   }
+  try {
+    db.exec(`ALTER TABLE documents ADD COLUMN preprocessed INTEGER DEFAULT 0`);
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.exec(`ALTER TABLE documents ADD COLUMN preprocessing_progress INTEGER DEFAULT 0`);
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.exec(`ALTER TABLE documents ADD COLUMN preprocessing_error TEXT`);
+  } catch {
+    // Column already exists.
+  }
   return db;
 }
 
@@ -80,20 +98,63 @@ export function insertDocument(record: DocumentRecord) {
 
 export function listDocuments() {
   if (!db) throw new Error("DB not initialized");
-  return db
+  const rows = db
     .prepare(
-      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount FROM documents ORDER BY added_at DESC`
+      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount,
+       preprocessed, preprocessing_progress AS preprocessingProgress,
+       preprocessing_error AS preprocessingError
+       FROM documents ORDER BY added_at DESC`
     )
-    .all() as DocumentRecord[];
+    .all() as Array<DocumentRecord & { preprocessed: number }>;
+  return rows.map(r => ({ ...r, preprocessed: !!r.preprocessed }));
 }
 
 export function getDocument(id: string) {
   if (!db) throw new Error("DB not initialized");
-  return db
+  const row = db
     .prepare(
-      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount FROM documents WHERE id = ?`
+      `SELECT id, path, filename, size, added_at AS addedAt, page_count AS pageCount,
+       preprocessed, preprocessing_progress AS preprocessingProgress,
+       preprocessing_error AS preprocessingError
+       FROM documents WHERE id = ?`
     )
-    .get(id) as DocumentRecord | undefined;
+    .get(id) as (DocumentRecord & { preprocessed: number }) | undefined;
+  if (!row) return undefined;
+  return { ...row, preprocessed: !!row.preprocessed };
+}
+
+export function updateDocumentPreprocessing(
+  id: string,
+  updates: {
+    preprocessed?: boolean;
+    preprocessingProgress?: number;
+    preprocessingError?: string | null;
+    pageCount?: number;
+  }
+) {
+  if (!db) throw new Error("DB not initialized");
+  const sets: string[] = [];
+  const params: Record<string, unknown> = { id };
+
+  if (updates.preprocessed !== undefined) {
+    sets.push("preprocessed = @preprocessed");
+    params.preprocessed = updates.preprocessed ? 1 : 0;
+  }
+  if (updates.preprocessingProgress !== undefined) {
+    sets.push("preprocessing_progress = @preprocessingProgress");
+    params.preprocessingProgress = updates.preprocessingProgress;
+  }
+  if (updates.preprocessingError !== undefined) {
+    sets.push("preprocessing_error = @preprocessingError");
+    params.preprocessingError = updates.preprocessingError;
+  }
+  if (updates.pageCount !== undefined) {
+    sets.push("page_count = @pageCount");
+    params.pageCount = updates.pageCount;
+  }
+
+  if (sets.length === 0) return;
+  db.prepare(`UPDATE documents SET ${sets.join(", ")} WHERE id = @id`).run(params);
 }
 
 export function insertEvent(params: {
