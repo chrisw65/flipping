@@ -98,8 +98,12 @@ export function createPageMesh(): PageMesh {
 
   const setTexture = (texture: THREE.Texture | null) => {
     frontTexture = texture;
-    for (const mat of faceMaterials) {
-      (mat as THREE.MeshPhongMaterial).map = texture ?? null;
+    // Set texture on all materials EXCEPT material 4 (back face)
+    // Material 4 is controlled separately by setBackTexture()
+    for (let i = 0; i < faceMaterials.length; i++) {
+      if (i === 4) continue; // Skip back face material
+      const mat = faceMaterials[i] as THREE.MeshPhongMaterial;
+      mat.map = texture ?? null;
       mat.needsUpdate = true;
     }
   };
