@@ -113,6 +113,14 @@ export function updateSheetGeometry(
     arc.push(arcLength);
   }
 
+  // Calculate separate arc lengths for back curve (different shape due to paper thickness)
+  let backArcLength = 0;
+  const backArc = [0];
+  for (let i = 1; i < backPts.length; i++) {
+    backArcLength += backPts[i].distanceTo(backPts[i - 1]);
+    backArc.push(backArcLength);
+  }
+
   const pos = geometry.getAttribute("position") as THREE.BufferAttribute | null;
   const uv = geometry.getAttribute("uv") as THREE.BufferAttribute | null;
   const layout = geometry.userData?.layout as
@@ -141,8 +149,10 @@ export function updateSheetGeometry(
       // UV mapping: front face is side-dependent, back face uses consistent mapping
       // Front: right pages have U=0 at spine, left pages have U=0 at outer edge
       // Back: always U=0 at outer edge so revealed back shows text correctly
+      // Use separate arc length calculation for back face (different curve shape)
       const uFront = params.pageSide > 0 ? 1 - uArc : uArc;
-      const uBack = uArc;
+      const uBackArc = backArcLength > 0 ? backArc[r] / backArcLength : r / Math.max(1, E - 1);
+      const uBack = uBackArc;
       setUv(uv, layout.frontTop + r, uFront, 0);
       setUv(uv, layout.frontBottom + r, uFront, 1);
       setUv(uv, layout.backTop + r, uBack, 0);
