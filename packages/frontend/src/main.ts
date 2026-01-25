@@ -1111,12 +1111,18 @@ async function requestAndLoadPage(
 
     // Try preprocessed page first if document is preprocessed
     if (isDocumentPreprocessed) {
-      const resolution = chooseResolution(desired.targetWidth);
-      const blob = await fetchPreprocessedPage(token, documentId, pageNumber, resolution);
-      if (blob) {
-        loaded = await loadTextureFromBlob(blob);
-      } else {
-        // Fall back to on-demand rasterization
+      try {
+        const resolution = chooseResolution(desired.targetWidth);
+        const blob = await fetchPreprocessedPage(token, documentId, pageNumber, resolution);
+        if (blob) {
+          loaded = await loadTextureFromBlob(blob);
+        } else {
+          // Preprocessed page not available, fall back to on-demand rasterization
+          throw new Error("Preprocessed page returned null");
+        }
+      } catch (preprocessError) {
+        // Fall back to on-demand rasterization on any error
+        console.warn(`Preprocessed page ${pageNumber} failed, falling back to rasterization:`, preprocessError);
         const first = await rasterizePage(token, {
           sessionId,
           documentId,

@@ -106,40 +106,37 @@ export async function preprocessDocument(
 
   // Process each page
   for (let page = 1; page <= pageCount; page++) {
-    let pageWidth = 0;
-    let pageHeight = 0;
+    // Render once at scale 1 to get natural dimensions
+    const baseResult = await rasterizePage({
+      documentPath,
+      pageNumber: page,
+      scale: 1,
+    });
+    const naturalWidth = baseResult.width;
+    const naturalHeight = baseResult.height;
 
     // Render at each resolution
     for (const resolution of resolutions) {
       const targetWidth = RESOLUTIONS[resolution];
-
-      // First render at scale 1 to get natural dimensions, then calculate proper scale
-      const baseResult = await rasterizePage({
-        documentPath,
-        pageNumber: page,
-        scale: 1,
-      });
-
-      const naturalWidth = baseResult.width;
-      const naturalHeight = baseResult.height;
       const scale = targetWidth / naturalWidth;
 
-      // Render at the calculated scale
-      const result = await rasterizePage({
-        documentPath,
-        pageNumber: page,
-        scale: Math.max(0.1, Math.min(4, scale)),
-      });
-
-      // Store dimensions from standard resolution
-      if (resolution === "standard") {
-        pageWidth = naturalWidth;
-        pageHeight = naturalHeight;
+      // Render at the calculated scale (or use base if scale ~= 1)
+      let buffer: Buffer;
+      if (Math.abs(scale - 1) < 0.01) {
+        // Use base result if scale is close to 1
+        buffer = baseResult.buffer;
+      } else {
+        const result = await rasterizePage({
+          documentPath,
+          pageNumber: page,
+          scale: Math.max(0.1, Math.min(4, scale)),
+        });
+        buffer = result.buffer;
       }
 
       // Convert to WebP and save
       const outputPath = getPreprocessedPagePath(outputDir, documentId, page, resolution);
-      await sharp(result.buffer)
+      await sharp(buffer)
         .webp({ quality: 85 })
         .toFile(outputPath);
 
@@ -152,9 +149,9 @@ export async function preprocessDocument(
 
     pages.push({
       page,
-      width: pageWidth,
-      height: pageHeight,
-      aspect: pageWidth / pageHeight,
+      width: naturalWidth,
+      height: naturalHeight,
+      aspect: naturalWidth / naturalHeight,
     });
   }
 
@@ -189,6 +186,8 @@ export function startPreprocessing(options: PreprocessingOptions): void {
     .catch((error) => {
       console.error(`[Preprocessor] Failed for ${options.documentId}:`, error);
       updateDocumentPreprocessing(options.documentId, {
+        preprocessed: false,
+        preprocessingProgress: 0,
         preprocessingError: error instanceof Error ? error.message : String(error),
       });
     });
