@@ -122,8 +122,8 @@ export async function preprocessDocument(
 
       // Render at the calculated scale (or use base if scale ~= 1)
       let buffer: Buffer;
-      if (Math.abs(scale - 1) < 0.01) {
-        // Use base result if scale is close to 1
+      if (Math.abs(scale - 1) < 0.1) {
+        // Use base result if scale is close to 1, then resize to exact target
         buffer = baseResult.buffer;
       } else {
         const result = await rasterizePage({
@@ -134,9 +134,10 @@ export async function preprocessDocument(
         buffer = result.buffer;
       }
 
-      // Convert to WebP and save
+      // Convert to WebP at exact target width and save
       const outputPath = getPreprocessedPagePath(outputDir, documentId, page, resolution);
       await sharp(buffer)
+        .resize(targetWidth, null, { fit: "inside", withoutEnlargement: false })
         .webp({ quality: 85 })
         .toFile(outputPath);
 
@@ -165,13 +166,27 @@ export async function preprocessDocument(
   const metadataPath = path.join(docDir, "metadata.json");
   await fs.writeFile(metadataPath, JSON.stringify(result, null, 2));
 
-  // Mark as preprocessed
+  // Mark as preprocessed and clear any previous error
   updateDocumentPreprocessing(documentId, {
     preprocessed: true,
     preprocessingProgress: 100,
+    preprocessingError: null,
   });
 
   return result;
+}
+
+/**
+ * Clean up partial preprocessing output on failure
+ */
+async function cleanupPartialPreprocessing(outputDir: string, documentId: string): Promise<void> {
+  const docDir = path.join(outputDir, documentId);
+  try {
+    await fs.rm(docDir, { recursive: true, force: true });
+    console.log(`[Preprocessor] Cleaned up partial output for ${documentId}`);
+  } catch (cleanupError) {
+    console.warn(`[Preprocessor] Failed to clean up partial output for ${documentId}:`, cleanupError);
+  }
 }
 
 /**
@@ -183,8 +198,12 @@ export function startPreprocessing(options: PreprocessingOptions): void {
     .then((result) => {
       console.log(`[Preprocessor] Completed preprocessing for document ${options.documentId}: ${result.pageCount} pages`);
     })
-    .catch((error) => {
+    .catch(async (error) => {
       console.error(`[Preprocessor] Failed for ${options.documentId}:`, error);
+
+      // Clean up any partial files
+      await cleanupPartialPreprocessing(options.outputDir, options.documentId);
+
       updateDocumentPreprocessing(options.documentId, {
         preprocessed: false,
         preprocessingProgress: 0,
