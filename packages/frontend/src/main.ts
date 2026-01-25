@@ -456,7 +456,14 @@ async function loadCurrentSpread() {
       }
     } else {
       rightPage.setTexture(null);
+      rightPage.setBackTexture(null);
     }
+
+    // Clear left back texture in single mode (it will be set by loadTurningBackTexture)
+    if (layoutMode === "single") {
+      leftPage.setBackTexture(null);
+    }
+
     void loadRightBack(rightPageNumber);
 
     if (referenceRender) {
@@ -950,6 +957,8 @@ layoutSelect?.addEventListener("change", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
     flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
+    // Reload textures for new layout mode
+    void loadCurrentSpread();
   }
 });
 pageInput?.addEventListener("change", () => {
