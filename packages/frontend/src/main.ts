@@ -456,7 +456,14 @@ async function loadCurrentSpread() {
       }
     } else {
       rightPage.setTexture(null);
+      rightPage.setBackTexture(null);
     }
+
+    // Clear left back texture in single mode (it will be set by loadTurningBackTexture)
+    if (layoutMode === "single") {
+      leftPage.setBackTexture(null);
+    }
+
     void loadRightBack(rightPageNumber);
 
     if (referenceRender) {
@@ -950,6 +957,8 @@ layoutSelect?.addEventListener("change", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
     flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
+    // Reload textures for new layout mode
+    void loadCurrentSpread();
   }
 });
 pageInput?.addEventListener("change", () => {
@@ -1111,12 +1120,18 @@ async function requestAndLoadPage(
 
     // Try preprocessed page first if document is preprocessed
     if (isDocumentPreprocessed) {
-      const resolution = chooseResolution(desired.targetWidth);
-      const blob = await fetchPreprocessedPage(token, documentId, pageNumber, resolution);
-      if (blob) {
-        loaded = await loadTextureFromBlob(blob);
-      } else {
-        // Fall back to on-demand rasterization
+      try {
+        const resolution = chooseResolution(desired.targetWidth);
+        const blob = await fetchPreprocessedPage(token, documentId, pageNumber, resolution);
+        if (blob) {
+          loaded = await loadTextureFromBlob(blob);
+        } else {
+          // Preprocessed page not available, fall back to on-demand rasterization
+          throw new Error("Preprocessed page returned null");
+        }
+      } catch (preprocessError) {
+        // Fall back to on-demand rasterization on any error
+        console.warn(`Preprocessed page ${pageNumber} failed, falling back to rasterization:`, preprocessError);
         const first = await rasterizePage(token, {
           sessionId,
           documentId,
