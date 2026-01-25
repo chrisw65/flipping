@@ -120,6 +120,12 @@ scene.add(rightPage.group);
 scene.add(underLeftPage.group);
 scene.add(underRightPage.group);
 
+// Hide all pages initially - updateLayout will show the appropriate ones
+leftPage.mesh.visible = false;
+rightPage.mesh.visible = false;
+underLeftPage.mesh.visible = false;
+underRightPage.mesh.visible = false;
+
 // Spine runs along Z axis at X=0 for horizontal book
 const spineMaterial = new THREE.MeshStandardMaterial({
   color: 0xd6d0c6,
@@ -457,6 +463,7 @@ async function loadCurrentSpread() {
     } else {
       rightPage.setTexture(null);
       rightPage.setBackTexture(null);
+      rightPage.mesh.visible = false;
     }
 
     // Clear left back texture in single mode (it will be set by loadTurningBackTexture)
@@ -877,6 +884,8 @@ async function handleRender() {
       }
     } else {
       rightPage.setTexture(null);
+      rightPage.setBackTexture(null);
+      rightPage.mesh.visible = false;
     }
 
     if (leftRender && rightRender) {
