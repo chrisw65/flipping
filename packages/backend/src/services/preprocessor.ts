@@ -122,9 +122,11 @@ export async function preprocessDocument(
 
       // Render at the calculated scale (or use base if scale ~= 1)
       let buffer: Buffer;
+      let bufferWidth: number;
       if (Math.abs(scale - 1) < 0.1) {
-        // Use base result if scale is close to 1, then resize to exact target
+        // Use base result if scale is close to 1
         buffer = baseResult.buffer;
+        bufferWidth = naturalWidth;
       } else {
         const result = await rasterizePage({
           documentPath,
@@ -132,14 +134,16 @@ export async function preprocessDocument(
           scale: Math.max(0.1, Math.min(4, scale)),
         });
         buffer = result.buffer;
+        bufferWidth = result.width;
       }
 
-      // Convert to WebP at exact target width and save
+      // Convert to WebP, only resize if buffer width doesn't match target
       const outputPath = getPreprocessedPagePath(outputDir, documentId, page, resolution);
-      await sharp(buffer)
-        .resize(targetWidth, null, { fit: "inside", withoutEnlargement: false })
-        .webp({ quality: 85 })
-        .toFile(outputPath);
+      let sharpPipeline = sharp(buffer);
+      if (bufferWidth !== targetWidth) {
+        sharpPipeline = sharpPipeline.resize(targetWidth, null, { fit: "inside", withoutEnlargement: false });
+      }
+      await sharpPipeline.webp({ quality: 85 }).toFile(outputPath);
 
       completedSteps++;
       const progress = Math.round((completedSteps / totalSteps) * 100);
