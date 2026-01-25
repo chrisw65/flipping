@@ -137,10 +137,11 @@ export async function preprocessDocument(
         bufferWidth = result.width;
       }
 
-      // Convert to WebP, only resize if buffer width doesn't match target
+      // Convert to WebP, only resize if buffer width differs from target by more than 1px
+      // (PDF rasterizers often return dimensions off by a pixel)
       const outputPath = getPreprocessedPagePath(outputDir, documentId, page, resolution);
       let sharpPipeline = sharp(buffer);
-      if (bufferWidth !== targetWidth) {
+      if (Math.abs(bufferWidth - targetWidth) > 1) {
         sharpPipeline = sharpPipeline.resize(targetWidth, null, { fit: "inside", withoutEnlargement: false });
       }
       await sharpPipeline.webp({ quality: 85 }).toFile(outputPath);
