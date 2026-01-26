@@ -740,30 +740,31 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     underLeftPage.mesh.visible = true;
     underRightPage.mesh.visible = true;
   } else {
-    // Single page mode - center a single page by shifting the mesh.
+    // Single page mode - truly center the page like a standalone card.
+    // The page geometry extends from X=0 to X=pageW (for a right page).
+    // To center it, position the GROUP at X=-pageW/2 so the page center is at world X=0.
     leftPage.setSize(pageW, pageD);
     rightPage.setSize(pageW, pageD);
     leftPage.setSide("left");
     rightPage.setSide("right");
-    leftPage.setOffsetX(-pageW / 2);
-    rightPage.setOffsetX(-pageW / 2);
-    // Base positions at spine; single-page shift applied in updateSinglePageVisibility().
-    leftPage.group.position.set(0, pageY, 0);
-    rightPage.group.position.set(0, pageY, 0);
+    // Clear mesh offsets - we use group position for centering instead
+    leftPage.setOffsetX(0);
+    rightPage.setOffsetX(0);
+    // Position groups to center each page type
+    // Left page extends from X=0 to X=-pageW, so center at X=+pageW/2
+    // Right page extends from X=0 to X=+pageW, so center at X=-pageW/2
+    leftPage.group.position.set(pageW / 2, pageY, 0);
+    rightPage.group.position.set(-pageW / 2, pageY, 0);
 
+    // Hide ALL book decorations in single page mode
     underLeftPage.mesh.visible = false;
     underRightPage.mesh.visible = false;
-    leftStack.visible = !minimalRender;
+    leftStack.visible = false;
     spine.visible = false;
     shadowEdge.visible = false;
     rightStack.visible = false;
     leftShadow.visible = false;
     rightShadow.visible = false;
-
-    if (!minimalRender) {
-      leftStack.scale.set(pageW, bookThickness, pageD);
-      leftStack.position.set(0, 0, 0);
-    }
 
     updateStackDepth(pageW, pageD, bookThickness, mode);
     updateSinglePageVisibility(currentPageNumber);
@@ -1379,9 +1380,7 @@ function updateSinglePageVisibility(pageNumber: number = currentPageNumber) {
   const showRight = singlePageBookletMode ? true : !showLeft;
   leftPage.mesh.visible = showLeft;
   rightPage.mesh.visible = showRight;
-  leftPage.group.position.x = 0;
-  rightPage.group.position.x = 0;
-  leftStack.position.x = 0;
+  // Don't reset group positions - they are set in updateLayout for proper centering
 }
 
 function buildPageCacheKey(
