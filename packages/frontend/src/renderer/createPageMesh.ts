@@ -13,6 +13,7 @@ export type PageMesh = {
   setFrontBiasDelta: (delta: number) => void;
   setFrontDepthWrite: (enabled: boolean) => void;
   setSize: (width: number, height: number) => void;
+  setOffsetX: (offset: number) => void;
   beginAnimation: () => void;
   endAnimation: () => void;
   getMaterial: () => THREE.MeshPhongMaterial;
@@ -56,6 +57,7 @@ export function createPageMesh(): PageMesh {
   let sheetAngleDeg = 0;
   let curveAngleDeg = 0;
   let flexibility = 0.9;
+  let baseOffsetX = 0;
 
   let baseBias = 0;
   let frontBiasDelta = 0;
@@ -88,6 +90,7 @@ export function createPageMesh(): PageMesh {
     });
 
     mesh.position.copy(result.positionOffset);
+    mesh.position.x += baseOffsetX;
     mesh.scale.x = result.scaleX;
   };
 
@@ -173,6 +176,11 @@ export function createPageMesh(): PageMesh {
     applyDeform();
   };
 
+  const setOffsetX = (offset: number) => {
+    baseOffsetX = offset;
+    applyDeform();
+  };
+
   const setSide = (side: "left" | "right") => {
     pageSide = side;
     // Re-create geometry for the new side
@@ -231,6 +239,7 @@ export function createPageMesh(): PageMesh {
     setFrontBiasDelta,
     setFrontDepthWrite,
     setSize,
+    setOffsetX,
     beginAnimation,
     endAnimation,
     getMaterial,

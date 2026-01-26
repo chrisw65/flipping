@@ -353,6 +353,41 @@ export class FlipbookController {
     return "edge";
   }
 
+  private resolveHitSide(hit: {
+    page: PageMesh;
+    u: number;
+    v: number;
+  }): { side: "left" | "right"; uOuter: number; zone: "corner" | "edge" | "none" } {
+    const visibleCount =
+      (this.leftPage.mesh.visible ? 1 : 0) + (this.rightPage.mesh.visible ? 1 : 0);
+    const baseSide = hit.page.getSide();
+    const uOuterRight = baseSide === "left" ? 1 - hit.u : hit.u;
+    const uOuterLeft = 1 - uOuterRight;
+    let side: "left" | "right" = baseSide;
+    let uOuter = uOuterRight;
+    let zone = this.detectHitZone(uOuter, hit.v);
+
+    if (visibleCount === 1) {
+      const zoneRight = this.detectHitZone(uOuterRight, hit.v);
+      const zoneLeft = this.detectHitZone(uOuterLeft, hit.v);
+      if (zoneRight !== "none" && zoneLeft !== "none") {
+        side = uOuterRight >= uOuterLeft ? "right" : "left";
+        uOuter = side === "right" ? uOuterRight : uOuterLeft;
+        zone = side === "right" ? zoneRight : zoneLeft;
+      } else if (zoneLeft !== "none") {
+        side = "left";
+        uOuter = uOuterLeft;
+        zone = zoneLeft;
+      } else if (zoneRight !== "none") {
+        side = "right";
+        uOuter = uOuterRight;
+        zone = zoneRight;
+      }
+    }
+
+    return { side, uOuter, zone };
+  }
+
   private handlePointerDown = (e: PointerEvent): void => {
     const state = this.stateMachine.getState();
     if (
@@ -374,9 +409,7 @@ export class FlipbookController {
       }
       return;
     }
-    const side = hit.page.getSide();
-    const uOuter = side === "left" ? 1 - hit.u : hit.u;
-    const zone = this.detectHitZone(uOuter, hit.v);
+    const { side, uOuter, zone } = this.resolveHitSide(hit);
     if (zone === "none") {
       if (this.config.debug) {
         const message = `hit: miss ${side} u=${uOuter.toFixed(2)} v=${hit.v.toFixed(2)}`;
@@ -438,9 +471,8 @@ export class FlipbookController {
     if (!this.isDragging) {
       const hoverHit = this.getPageHit(e);
       if (hoverHit) {
-        const hoverSide = hoverHit.page.getSide();
-        const hoverOuterU = hoverSide === "left" ? 1 - hoverHit.u : hoverHit.u;
-        if (this.detectHitZone(hoverOuterU, hoverHit.v) !== "none") {
+        const { side: hoverSide, uOuter, zone } = this.resolveHitSide(hoverHit);
+        if (zone !== "none") {
           this.stateMachine.hoverCorner(hoverSide);
           this.config.onHoverSide?.(hoverSide);
           this.setCursor("grab");

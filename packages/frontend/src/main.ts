@@ -439,36 +439,55 @@ async function loadCurrentSpread() {
 
   try {
     let referenceRender: { width: number; height: number } | null = null;
+    const isSingle = layoutMode === "single";
+    const singlePageMesh = isSingle ? getSinglePageMesh(currentPageNumber) : null;
+    const singleOtherMesh =
+      isSingle && singlePageMesh ? (singlePageMesh === leftPage ? rightPage : leftPage) : null;
     // Fast low-res pass for immediate response.
     const [leftRender, rightRender] = await loadAtTarget({
       qualityScale: underQualityScale,
       maxWidthScale: underQualityScale
     });
     if (!isActive()) return;
-    if (leftRender) {
-      leftPage.setTexture(leftRender.texture);
-      referenceRender = { width: leftRender.width, height: leftRender.height };
+    if (isSingle && singlePageMesh) {
+      if (leftRender) {
+        singlePageMesh.setTexture(leftRender.texture);
+        referenceRender = { width: leftRender.width, height: leftRender.height };
+      } else {
+        singlePageMesh.setTexture(null);
+      }
+      if (singleOtherMesh) {
+        singleOtherMesh.setTexture(null);
+        singleOtherMesh.setBackTexture(null);
+      }
+      updateSinglePageVisibility(currentPageNumber);
+    } else {
+      if (leftRender) {
+        leftPage.setTexture(leftRender.texture);
+        referenceRender = { width: leftRender.width, height: leftRender.height };
+        if (rightRender) {
+          leftPage.setBackTexture(rightRender.texture);
+        }
+      } else {
+        leftPage.setTexture(null);
+      }
+
       if (rightRender) {
-        leftPage.setBackTexture(rightRender.texture);
+        rightPage.setTexture(rightRender.texture);
+        if (!referenceRender) {
+          referenceRender = { width: rightRender.width, height: rightRender.height };
+        }
+      } else {
+        rightPage.setTexture(null);
+        rightPage.setBackTexture(null);
+        rightPage.mesh.visible = false;
       }
-    } else {
-      leftPage.setTexture(null);
     }
 
-    if (rightRender) {
-      rightPage.setTexture(rightRender.texture);
-      if (!referenceRender) {
-        referenceRender = { width: rightRender.width, height: rightRender.height };
-      }
-    } else {
-      rightPage.setTexture(null);
-      rightPage.setBackTexture(null);
-      rightPage.mesh.visible = false;
-    }
-
-    // Clear left back texture in single mode (it will be set by loadTurningBackTexture)
+    // Clear back texture in single mode (it will be set by loadTurningBackTexture)
     if (layoutMode === "single") {
       leftPage.setBackTexture(null);
+      rightPage.setBackTexture(null);
     }
 
     void loadRightBack(rightPageNumber);
@@ -491,14 +510,22 @@ async function loadCurrentSpread() {
         maxWidthScale: activeQualityBoost
       });
       if (!isActive()) return;
-      if (leftHi) {
-        leftPage.setTexture(leftHi.texture);
-      }
-      if (rightHi) {
-        rightPage.setTexture(rightHi.texture);
-      }
-      if (leftHi && rightHi) {
-        leftPage.setBackTexture(rightHi.texture);
+      if (layoutMode === "single") {
+        const singleMesh = getSinglePageMesh(currentPageNumber);
+        if (leftHi) {
+          singleMesh.setTexture(leftHi.texture);
+        }
+        updateSinglePageVisibility(currentPageNumber);
+      } else {
+        if (leftHi) {
+          leftPage.setTexture(leftHi.texture);
+        }
+        if (rightHi) {
+          rightPage.setTexture(rightHi.texture);
+        }
+        if (leftHi && rightHi) {
+          leftPage.setBackTexture(rightHi.texture);
+        }
       }
     })();
   } catch (error) {
@@ -611,6 +638,7 @@ let token = "";
 let documentId = "";
 let isDocumentPreprocessed = false;
 let lastPageSize: { width: number; height: number } | null = null;
+let singlePageWorldWidth = 1;
 let hideTurningFrontFace = false;
 let lastTurnDirection: "forward" | "backward" | null = null;
 let hideUnderPagesDuringDrag = false;
@@ -622,6 +650,7 @@ const disableTextureCache = true;
 const pageCacheWindow = 3;
 const activeQualityBoost = 1.2;
 const underQualityScale = 0.9;
+const singlePageBookletMode = true;
 
 type LayoutMode = "auto" | "single" | "double";
 type PageSizePreset = "auto" | "a4" | "6x9" | "8.5x8.5";
@@ -650,6 +679,7 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
   const bookThickness = 0.02; // Y direction thickness
   // Stack top is at bookThickness, so pages must sit above that.
   const pageY = bookThickness + 0.001;
+  singlePageWorldWidth = pageW;
 
   if (mode === "double") {
     // Set page sizes: width (X) and depth (Z)
@@ -661,6 +691,8 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     rightPage.setSide("right");
     underLeftPage.setSide("left");
     underRightPage.setSide("right");
+    leftPage.setOffsetX(0);
+    rightPage.setOffsetX(0);
 
     // Position pages at spine (X=0), slightly above Y=0
     leftPage.group.position.set(0, pageY, 0);
@@ -708,17 +740,20 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
     underLeftPage.mesh.visible = true;
     underRightPage.mesh.visible = true;
   } else {
-    // Single page mode - show as right page (like first page of book)
+    // Single page mode - center a single page by shifting the mesh.
     leftPage.setSize(pageW, pageD);
-    leftPage.setSide("right");
-    // Position so page is centered (spine edge at X=0, page extends to +X)
+    rightPage.setSize(pageW, pageD);
+    leftPage.setSide("left");
+    rightPage.setSide("right");
+    leftPage.setOffsetX(-pageW / 2);
+    rightPage.setOffsetX(-pageW / 2);
+    // Base positions at spine; single-page shift applied in updateSinglePageVisibility().
     leftPage.group.position.set(0, pageY, 0);
+    rightPage.group.position.set(0, pageY, 0);
 
     underLeftPage.mesh.visible = false;
     underRightPage.mesh.visible = false;
     leftStack.visible = !minimalRender;
-    rightPage.mesh.visible = false;
-    leftPage.mesh.visible = true;
     spine.visible = false;
     shadowEdge.visible = false;
     rightStack.visible = false;
@@ -727,10 +762,11 @@ function updateLayout(pageWidth: number, pageHeight: number, mode: LayoutMode) {
 
     if (!minimalRender) {
       leftStack.scale.set(pageW, bookThickness, pageD);
-      leftStack.position.set(pageW / 2, 0, 0);
+      leftStack.position.set(0, 0, 0);
     }
 
     updateStackDepth(pageW, pageD, bookThickness, mode);
+    updateSinglePageVisibility(currentPageNumber);
   }
 }
 
@@ -859,6 +895,10 @@ async function handleRender() {
     const rightPageNumber = spread.right;
     currentSpreadLeft = spread.spreadLeft ?? pageNumber;
     let referenceRender: { width: number; height: number } | null = null;
+    const isSingle = layoutMode === "single";
+    const singlePageMesh = isSingle ? getSinglePageMesh(pageNumber) : null;
+    const singleOtherMesh =
+      isSingle && singlePageMesh ? (singlePageMesh === leftPage ? rightPage : leftPage) : null;
     let leftRender: Awaited<ReturnType<typeof requestAndLoadPage>> | null = null;
     let rightRender: Awaited<ReturnType<typeof requestAndLoadPage>> | null = null;
 
@@ -867,7 +907,11 @@ async function handleRender() {
         target: { qualityScale: underQualityScale, maxWidthScale: underQualityScale }
       });
       if (!isActive() || !leftRender) return;
-      leftPage.setTexture(leftRender.texture);
+      if (isSingle && singlePageMesh) {
+        singlePageMesh.setTexture(leftRender.texture);
+      } else {
+        leftPage.setTexture(leftRender.texture);
+      }
       referenceRender = { width: leftRender.width, height: leftRender.height };
     } else {
       leftPage.setTexture(null);
@@ -882,14 +926,20 @@ async function handleRender() {
       if (!referenceRender) {
         referenceRender = { width: rightRender.width, height: rightRender.height };
       }
-    } else {
+    } else if (!isSingle) {
       rightPage.setTexture(null);
       rightPage.setBackTexture(null);
-      rightPage.mesh.visible = false;
     }
 
     if (leftRender && rightRender) {
       leftPage.setBackTexture(rightRender.texture);
+    }
+    if (layoutMode === "single") {
+      if (singleOtherMesh) {
+        singleOtherMesh.setTexture(null);
+        singleOtherMesh.setBackTexture(null);
+      }
+      updateSinglePageVisibility(pageNumber);
     }
     if (layoutMode === "double" && rightPageNumber) {
       const backPageNumber = rightPageNumber + 1;
@@ -942,10 +992,16 @@ async function handleRender() {
           : null
       ]);
       if (!isActive()) return;
-      if (leftHi) leftPage.setTexture(leftHi.texture);
-      if (rightHi) rightPage.setTexture(rightHi.texture);
-      if (leftHi && rightHi) {
-        leftPage.setBackTexture(rightHi.texture);
+      if (layoutMode === "single") {
+        const singleMesh = getSinglePageMesh(pageNumber);
+        if (leftHi) singleMesh.setTexture(leftHi.texture);
+        updateSinglePageVisibility(pageNumber);
+      } else {
+        if (leftHi) leftPage.setTexture(leftHi.texture);
+        if (rightHi) rightPage.setTexture(rightHi.texture);
+        if (leftHi && rightHi) {
+          leftPage.setBackTexture(rightHi.texture);
+        }
       }
     })();
   } catch (error) {
@@ -966,6 +1022,9 @@ layoutSelect?.addEventListener("change", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
     flipbookController.setPageStep(resolveLayout() === "double" ? 2 : 1);
+    if (resolveLayout() === "single") {
+      updateSinglePageVisibility(currentPageNumber);
+    }
     // Reload textures for new layout mode
     void loadCurrentSpread();
   }
@@ -981,6 +1040,9 @@ const sizeSelect = document.getElementById("sizeSelect") as HTMLSelectElement | 
 sizeSelect?.addEventListener("change", () => {
   if (lastPageSize) {
     updateLayout(lastPageSize.width, lastPageSize.height, resolveLayout());
+    if (resolveLayout() === "single") {
+      updateSinglePageVisibility(currentPageNumber);
+    }
   }
 });
 
@@ -1307,6 +1369,21 @@ function resolveSpread(
   return { left: spreadLeft, right, spreadLeft };
 }
 
+function getSinglePageMesh(pageNumber: number = currentPageNumber) {
+  if (singlePageBookletMode) return rightPage;
+  return pageNumber % 2 === 0 ? leftPage : rightPage;
+}
+
+function updateSinglePageVisibility(pageNumber: number = currentPageNumber) {
+  const showLeft = singlePageBookletMode ? false : pageNumber % 2 === 0;
+  const showRight = singlePageBookletMode ? true : !showLeft;
+  leftPage.mesh.visible = showLeft;
+  rightPage.mesh.visible = showRight;
+  leftPage.group.position.x = 0;
+  rightPage.group.position.x = 0;
+  leftStack.position.x = 0;
+}
+
 function buildPageCacheKey(
   pageNumber: number,
   mode: LayoutMode,
@@ -1400,7 +1477,7 @@ async function loadTurningBackTexture(direction: "forward" | "backward") {
       ? currentPageNumber + 1
       : currentPageNumber - 1;
     if (targetPage < 1 || targetPage > totalDocumentPages) {
-      leftPage.setBackTexture(null);
+      getSinglePageMesh(currentPageNumber).setBackTexture(null);
       return;
     }
     const render = await requestAndLoadPage(targetPage, layoutMode, scale, () => true, {
@@ -1408,7 +1485,7 @@ async function loadTurningBackTexture(direction: "forward" | "backward") {
       target
     });
     if (render) {
-      leftPage.setBackTexture(render.texture);
+      getSinglePageMesh(currentPageNumber).setBackTexture(render.texture);
     }
     return;
   }
